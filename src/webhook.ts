@@ -157,9 +157,11 @@ async function postBatch(
       transientFailures += 1;
       const description = redactWebhookTokens(describeFetchError(error));
       if (transientFailures >= MAX_TRANSIENT_ATTEMPTS) {
-        throw new Error(`could not reach Discord after ${MAX_TRANSIENT_ATTEMPTS} attempts: ${description}`, {
-          cause: error,
-        });
+        // The caught error is deliberately NOT attached as `cause`: undici error messages can
+        // contain the full request URL, and consumers log thrown errors whole, which would
+        // leak the webhook token past the redaction below.
+        // oxlint-disable-next-line preserve-caught-error
+        throw new Error(`could not reach Discord after ${MAX_TRANSIENT_ATTEMPTS} attempts: ${description}`);
       }
       const delayMs = transientDelayMs(transientFailures);
       note(`network error (${description}) — retrying in ${formatSeconds(delayMs)}`);

@@ -90,6 +90,38 @@ describe("resolveInputs with URLs", () => {
     ).rejects.toThrow(/GET https:\/\/example\.com\/missing failed: 404/);
   });
 
+  it("lets --name decide the content type when its extension is known", async () => {
+    const response = new Response("{}", { status: 200, headers: { "content-type": "text/plain" } });
+    const [resolved] = await resolveInputs(["https://example.com/raw"], {
+      nameOverride: "report.json",
+      fetchImpl: fetchReturning(response),
+    });
+    expect(resolved?.name).toBe("report.json");
+    expect(resolved?.contentType).toBe("application/json");
+  });
+
+  it("keeps the response content type when --name has no known extension", async () => {
+    const response = new Response("data", { status: 200, headers: { "content-type": "text/plain" } });
+    const [resolved] = await resolveInputs(["https://example.com/raw"], {
+      nameOverride: "weird.unknownext",
+      fetchImpl: fetchReturning(response),
+    });
+    expect(resolved?.contentType).toBe("text/plain");
+  });
+
+  it("names the URL when the response body fails mid-read", async () => {
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("partial"));
+        controller.error(new Error("terminated"));
+      },
+    });
+    const response = new Response(body, { status: 200, headers: { "content-type": "text/plain" } });
+    await expect(
+      resolveInputs(["https://example.com/flaky.txt"], { fetchImpl: fetchReturning(response) }),
+    ).rejects.toThrow(/GET https:\/\/example\.com\/flaky\.txt failed while reading the response/);
+  });
+
   it("rejects a download whose declared size can never fit in Discord", async () => {
     const response = new Response("tiny", {
       status: 200,
@@ -119,6 +151,17 @@ describe("filenameForDownload", () => {
   it("falls back to the hostname for a bare origin", () => {
     expect(filenameForDownload("https://example.com/", null, "text/html")).toBe("example.com.html");
     expect(filenameForDownload("https://example.com/", null, "application/octet-stream")).toBe("example.com");
+  });
+
+  it("appends extensions for the whole reverse content-type map", () => {
+    expect(filenameForDownload("https://example.com/media", null, "video/mp4")).toBe("media.mp4");
+    expect(filenameForDownload("https://example.com/dump", null, "application/gzip")).toBe("dump.gz");
+  });
+
+  it("parses Content-Disposition parameter names case-insensitively", () => {
+    expect(filenameForDownload("https://example.com/x", 'attachment; Filename="report.pdf"', "application/pdf")).toBe(
+      "report.pdf",
+    );
   });
 
   it("prefers the content-disposition filename", () => {

@@ -86,6 +86,17 @@ const EXTENSION_BY_CONTENT_TYPE: Record<string, string> = {
   "image/gif": "gif",
   "image/webp": "webp",
   "image/svg+xml": "svg",
+  "image/x-icon": "ico",
+  "text/css": "css",
+  "text/javascript": "js",
+  "text/yaml": "yaml",
+  "text/tab-separated-values": "tsv",
+  "application/gzip": "gz",
+  "application/x-tar": "tar",
+  "audio/mpeg": "mp3",
+  "audio/wav": "wav",
+  "video/mp4": "mp4",
+  "video/webm": "webm",
 };
 
 export function isUrl(spec: string): boolean {
@@ -125,9 +136,15 @@ async function resolveOne(spec: string, options: ResolveOptions): Promise<Outgoi
 }
 
 async function readLocalFile(path: string, nameOverride: string | undefined): Promise<OutgoingFile> {
-  const info = await stat(path).catch(() => undefined);
-  if (info === undefined) {
-    throw new Error(`${path}: no such file (URLs must start with http:// or https://)`);
+  let info;
+  try {
+    info = await stat(path);
+  } catch (error) {
+    const code = error instanceof Error ? (error as NodeJS.ErrnoException).code : undefined;
+    if (code === "ENOENT" || code === "ENOTDIR") {
+      throw new Error(`${path}: no such file (URLs must start with http:// or https://)`, { cause: error });
+    }
+    throw new Error(`${path}: cannot read (${code ?? describeFetchError(error)})`, { cause: error });
   }
   if (info.isDirectory()) {
     throw new Error(`${path}: is a directory — archive it first (for example: zip -r out.zip ${path})`);
@@ -163,11 +180,14 @@ async function download(url: string, options: ResolveOptions): Promise<OutgoingF
     );
   }
   const data = await readBodyCapped(response, url);
-  const contentType = normalizeContentType(response.headers.get("content-type"));
-  const name =
-    sanitizeFilename(options.nameOverride ?? "") ||
-    filenameForDownload(response.url || url, response.headers.get("content-disposition"), contentType);
-  return { name, data, contentType };
+  const headerType = normalizeContentType(response.headers.get("content-type"));
+  const overrideName = sanitizeFilename(options.nameOverride ?? "");
+  if (overrideName !== "") {
+    // Like the local-file and stdin paths, --name also decides the content type when its extension is known.
+    return { name: overrideName, data, contentType: extensionContentType(overrideName) ?? headerType };
+  }
+  const name = filenameForDownload(response.url || url, response.headers.get("content-disposition"), headerType);
+  return { name, data, contentType: headerType };
 }
 
 async function resolveStdin(options: ResolveOptions): Promise<OutgoingFile> {
@@ -189,11 +209,19 @@ async function readProcessStdin(): Promise<Uint8Array> {
     );
   }
   const chunks: Uint8Array[] = [];
+  let total = 0;
   for await (const chunk of process.stdin) {
-    chunks.push(chunk instanceof Buffer ? chunk : Buffer.from(String(chunk)));
+    const bytes = chunk instanceof Buffer ? chunk : Buffer.from(String(chunk));
+    total += bytes.byteLength;
+    if (total > MAX_FILE_BYTES) {
+      throw new Error(`stdin: exceeds Discord's absolute limit of ${formatMiB(MAX_FILE_BYTES)}`);
+    }
+    chunks.push(bytes);
   }
   return Buffer.concat(chunks);
 }
+
+class SizeLimitError extends Error {}
 
 async function readBodyCapped(response: Awaited<ReturnType<FetchLike>>, url: string): Promise<Uint8Array> {
   if (response.body === null) {
@@ -201,12 +229,19 @@ async function readBodyCapped(response: Awaited<ReturnType<FetchLike>>, url: str
   }
   const chunks: Uint8Array[] = [];
   let total = 0;
-  for await (const chunk of response.body) {
-    total += chunk.byteLength;
-    if (total > MAX_FILE_BYTES) {
-      throw new Error(`${url}: response exceeds Discord's absolute limit of ${formatMiB(MAX_FILE_BYTES)}`);
+  try {
+    for await (const chunk of response.body) {
+      total += chunk.byteLength;
+      if (total > MAX_FILE_BYTES) {
+        throw new SizeLimitError(`${url}: response exceeds Discord's absolute limit of ${formatMiB(MAX_FILE_BYTES)}`);
+      }
+      chunks.push(chunk);
     }
-    chunks.push(chunk);
+  } catch (error) {
+    if (error instanceof SizeLimitError) {
+      throw error;
+    }
+    throw new Error(`GET ${url} failed while reading the response: ${describeFetchError(error)}`, { cause: error });
   }
   return Buffer.concat(chunks);
 }
@@ -244,11 +279,11 @@ function filenameFromContentDisposition(header: string): string | undefined {
       // fall through to the plain filename parameter
     }
   }
-  const quoted = /filename\s*=\s*"((?:[^"\\]|\\.)*)"/.exec(header);
+  const quoted = /filename\s*=\s*"((?:[^"\\]|\\.)*)"/i.exec(header);
   if (quoted?.[1] !== undefined) {
     return quoted[1].replace(/\\(.)/g, "$1");
   }
-  const bare = /filename\s*=\s*([^;]+)/.exec(header);
+  const bare = /filename\s*=\s*([^;]+)/i.exec(header);
   const value = bare?.[1]?.trim();
   return value === undefined || value === "" ? undefined : value;
 }
@@ -288,9 +323,16 @@ function sanitizeFilename(name: string): string {
   return visible.trim().slice(0, MAX_FILENAME_LENGTH);
 }
 
+function extensionContentType(name: string): string | undefined {
+  const parts = name.split(".");
+  if (parts.length < 2) {
+    return undefined;
+  }
+  return CONTENT_TYPE_BY_EXTENSION[(parts.at(-1) ?? "").toLowerCase()];
+}
+
 function contentTypeForName(name: string): string {
-  const extension = name.split(".").length > 1 ? (name.split(".").at(-1) ?? "").toLowerCase() : "";
-  return CONTENT_TYPE_BY_EXTENSION[extension] ?? FALLBACK_CONTENT_TYPE;
+  return extensionContentType(name) ?? FALLBACK_CONTENT_TYPE;
 }
 
 function normalizeContentType(header: string | null): string {
