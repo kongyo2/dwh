@@ -54,6 +54,10 @@ describe("resolveInputs with local files", () => {
     await expect(resolveInputs([dir])).rejects.toThrow(/is a directory/);
   });
 
+  it("rejects non-regular files such as devices, pointing at stdin", async () => {
+    await expect(resolveInputs(["/dev/null"])).rejects.toThrow(/not a regular file/);
+  });
+
   it("reports every failing input, not just the first", async () => {
     const dir = await scratchDir();
     const first = join(dir, "one.txt");
@@ -162,6 +166,16 @@ describe("filenameForDownload", () => {
     expect(filenameForDownload("https://example.com/x", 'attachment; Filename="report.pdf"', "application/pdf")).toBe(
       "report.pdf",
     );
+  });
+
+  it("accepts an RFC 5987 language tag in extended filenames", () => {
+    expect(
+      filenameForDownload(
+        "https://example.com/x",
+        "attachment; filename*=UTF-8'en'%E2%82%ACrates.pdf",
+        "application/pdf",
+      ),
+    ).toBe("€rates.pdf");
   });
 
   it("prefers the content-disposition filename", () => {

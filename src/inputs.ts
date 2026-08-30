@@ -149,6 +149,11 @@ async function readLocalFile(path: string, nameOverride: string | undefined): Pr
   if (info.isDirectory()) {
     throw new Error(`${path}: is a directory — archive it first (for example: zip -r out.zip ${path})`);
   }
+  if (!info.isFile()) {
+    // A FIFO blocks readFile until a writer closes it and a device like /dev/zero never ends,
+    // so only regular files are read from a path; streams go through stdin, which is capped.
+    throw new Error(`${path}: not a regular file — pipe it through stdin instead (for example: cat ${path} | dwh -)`);
+  }
   if (info.size > MAX_FILE_BYTES) {
     throw new Error(
       `${path}: ${formatMiB(info.size)} exceeds Discord's absolute limit of ${formatMiB(MAX_FILE_BYTES)}`,
@@ -271,7 +276,7 @@ export function filenameForDownload(finalUrl: string, contentDisposition: string
 }
 
 function filenameFromContentDisposition(header: string): string | undefined {
-  const star = /filename\*\s*=\s*utf-8''([^;]+)/i.exec(header);
+  const star = /filename\*\s*=\s*utf-8'[^']*'([^;]+)/i.exec(header);
   if (star?.[1] !== undefined) {
     try {
       return decodeURIComponent(star[1].trim());
