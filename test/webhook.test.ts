@@ -187,6 +187,25 @@ describe("sendFiles", () => {
     expect(waits).toEqual([1000, 2000]);
   });
 
+  it("cancels unread 5xx bodies so connections are released", async () => {
+    let cancelled = false;
+    const failing = new Response(
+      new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode("error page"));
+        },
+        cancel() {
+          cancelled = true;
+        },
+      }),
+      { status: 500 },
+    );
+    const { impl } = queueFetch(failing, ok());
+    const { sleep } = sleepRecorder();
+    await sendFiles(WEBHOOK, [file("a.txt")], { fetchImpl: impl, sleep });
+    expect(cancelled).toBe(true);
+  });
+
   it("gives up after five 5xx attempts", async () => {
     const { calls, impl } = queueFetch(...Array.from({ length: 5 }, () => new Response("", { status: 500 })));
     const { waits, sleep } = sleepRecorder();

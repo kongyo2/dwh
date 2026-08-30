@@ -1,6 +1,14 @@
 import { readFile, stat } from "node:fs/promises";
 import { basename } from "node:path";
-import { describeFetchError, proxyAwareFetch, type FetchLike } from "./http.js";
+import {
+  defaultSleep,
+  describeFetchError,
+  formatSeconds,
+  MAX_TRANSIENT_ATTEMPTS,
+  proxyAwareFetch,
+  transientDelayMs,
+  type FetchLike,
+} from "./http.js";
 
 /** A file ready to be attached to a Discord message. */
 export interface OutgoingFile {
@@ -14,10 +22,16 @@ export interface ResolveOptions {
   nameOverride?: string | undefined;
   fetchImpl?: FetchLike | undefined;
   readStdin?: (() => Promise<Uint8Array>) | undefined;
+  /** Progress notes worth relaying (download retries). Never an error. */
+  onNote?: ((note: string) => void) | undefined;
+  sleep?: ((ms: number) => Promise<void>) | undefined;
 }
 
 /** Discord's ceiling at the highest server boost tier; nothing larger can ever be accepted. */
 export const MAX_FILE_BYTES: number = 100 * 1024 * 1024;
+
+/** Everything is buffered in memory before sending, so one run caps the combined input bytes. */
+export const MAX_TOTAL_BYTES: number = 512 * 1024 * 1024;
 
 const DOWNLOAD_TIMEOUT_MS = 300_000;
 const MAX_FILENAME_LENGTH = 180;
@@ -109,7 +123,8 @@ export function isUrl(spec: string): boolean {
  * Every failing input is reported, not just the first one.
  */
 export async function resolveInputs(specs: readonly string[], options: ResolveOptions = {}): Promise<OutgoingFile[]> {
-  const results = await Promise.allSettled(specs.map((spec) => resolveOne(spec, options)));
+  const budget: BufferBudget = { used: 0 };
+  const results = await Promise.allSettled(specs.map((spec) => resolveOne(spec, options, budget)));
   const failures: string[] = [];
   const files: OutgoingFile[] = [];
   for (const result of results) {
@@ -125,17 +140,35 @@ export async function resolveInputs(specs: readonly string[], options: ResolveOp
   return files;
 }
 
-async function resolveOne(spec: string, options: ResolveOptions): Promise<OutgoingFile> {
+async function resolveOne(spec: string, options: ResolveOptions, budget: BufferBudget): Promise<OutgoingFile> {
   if (spec === "-") {
-    return resolveStdin(options);
+    return resolveStdin(options, budget);
   }
   if (isUrl(spec)) {
-    return download(spec, options);
+    return download(spec, options, budget);
   }
-  return readLocalFile(spec, options.nameOverride);
+  return readLocalFile(spec, options.nameOverride, budget);
 }
 
-async function readLocalFile(path: string, nameOverride: string | undefined): Promise<OutgoingFile> {
+/** Bytes retained in memory across all concurrently resolving inputs of one run. */
+interface BufferBudget {
+  used: number;
+}
+
+function claimBufferBytes(budget: BufferBudget, bytes: number, label: string): void {
+  budget.used += bytes;
+  if (budget.used > MAX_TOTAL_BYTES) {
+    throw new SizeLimitError(
+      `${label}: combined inputs exceed the ${formatMiB(MAX_TOTAL_BYTES)} dwh holds in memory per run — send fewer or smaller files at once`,
+    );
+  }
+}
+
+async function readLocalFile(
+  path: string,
+  nameOverride: string | undefined,
+  budget: BufferBudget,
+): Promise<OutgoingFile> {
   let info;
   try {
     info = await stat(path);
@@ -159,22 +192,14 @@ async function readLocalFile(path: string, nameOverride: string | undefined): Pr
       `${path}: ${formatMiB(info.size)} exceeds Discord's absolute limit of ${formatMiB(MAX_FILE_BYTES)}`,
     );
   }
+  claimBufferBytes(budget, info.size, path);
   const data = await readFile(path);
   const name = sanitizeFilename(nameOverride ?? basename(path)) || "file";
   return { name, data, contentType: contentTypeForName(name) };
 }
 
-async function download(url: string, options: ResolveOptions): Promise<OutgoingFile> {
-  const fetchImpl = options.fetchImpl ?? proxyAwareFetch;
-  let response: Awaited<ReturnType<FetchLike>>;
-  try {
-    response = await fetchImpl(url, {
-      headers: { "user-agent": "dwh" },
-      signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
-    });
-  } catch (error) {
-    throw new Error(`GET ${url} failed: ${describeFetchError(error)}`, { cause: error });
-  }
+async function download(url: string, options: ResolveOptions, budget: BufferBudget): Promise<OutgoingFile> {
+  const response = await fetchDownload(url, options);
   if (!response.ok) {
     throw new Error(`GET ${url} failed: ${response.status} ${response.statusText}`.trimEnd());
   }
@@ -184,7 +209,7 @@ async function download(url: string, options: ResolveOptions): Promise<OutgoingF
       `${url}: ${formatMiB(declaredLength)} exceeds Discord's absolute limit of ${formatMiB(MAX_FILE_BYTES)}`,
     );
   }
-  const data = await readBodyCapped(response, url);
+  const data = await readBodyCapped(response, url, budget);
   const headerType = normalizeContentType(response.headers.get("content-type"));
   const overrideName = sanitizeFilename(options.nameOverride ?? "");
   if (overrideName !== "") {
@@ -195,7 +220,51 @@ async function download(url: string, options: ResolveOptions): Promise<OutgoingF
   return { name, data, contentType: headerType };
 }
 
-async function resolveStdin(options: ResolveOptions): Promise<OutgoingFile> {
+/** GET with the same bounded transient-failure retry policy the webhook delivery uses. */
+async function fetchDownload(url: string, options: ResolveOptions): Promise<Awaited<ReturnType<FetchLike>>> {
+  const fetchImpl = options.fetchImpl ?? proxyAwareFetch;
+  const sleep = options.sleep ?? defaultSleep;
+  const note = options.onNote ?? (() => undefined);
+  let transientFailures = 0;
+  for (;;) {
+    let response: Awaited<ReturnType<FetchLike>>;
+    try {
+      response = await fetchImpl(url, {
+        headers: { "user-agent": "dwh" },
+        signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
+      });
+    } catch (error) {
+      transientFailures += 1;
+      if (transientFailures >= MAX_TRANSIENT_ATTEMPTS) {
+        throw new Error(`GET ${url} failed after ${MAX_TRANSIENT_ATTEMPTS} attempts: ${describeFetchError(error)}`, {
+          cause: error,
+        });
+      }
+      const delayMs = transientDelayMs(transientFailures);
+      note(`GET ${url} failed (${describeFetchError(error)}) — retrying in ${formatSeconds(delayMs)}`);
+      await sleep(delayMs);
+      continue;
+    }
+    if (response.status >= 500) {
+      // Cancel the unread body so the connection is released between attempts.
+      await response.body?.cancel().catch(() => undefined);
+      transientFailures += 1;
+      if (transientFailures >= MAX_TRANSIENT_ATTEMPTS) {
+        const statusText = response.statusText === "" ? "" : ` ${response.statusText}`;
+        throw new Error(
+          `GET ${url} failed: ${response.status}${statusText} (after ${MAX_TRANSIENT_ATTEMPTS} attempts)`,
+        );
+      }
+      const delayMs = transientDelayMs(transientFailures);
+      note(`GET ${url} returned ${response.status} — retrying in ${formatSeconds(delayMs)}`);
+      await sleep(delayMs);
+      continue;
+    }
+    return response;
+  }
+}
+
+async function resolveStdin(options: ResolveOptions, budget: BufferBudget): Promise<OutgoingFile> {
   const read = options.readStdin ?? readProcessStdin;
   const data = await read();
   if (data.byteLength > MAX_FILE_BYTES) {
@@ -203,6 +272,7 @@ async function resolveStdin(options: ResolveOptions): Promise<OutgoingFile> {
       `stdin: ${formatMiB(data.byteLength)} exceeds Discord's absolute limit of ${formatMiB(MAX_FILE_BYTES)}`,
     );
   }
+  claimBufferBytes(budget, data.byteLength, "stdin");
   const name = sanitizeFilename(options.nameOverride ?? "") || "stdin.txt";
   return { name, data, contentType: contentTypeForName(name) };
 }
@@ -228,7 +298,11 @@ async function readProcessStdin(): Promise<Uint8Array> {
 
 class SizeLimitError extends Error {}
 
-async function readBodyCapped(response: Awaited<ReturnType<FetchLike>>, url: string): Promise<Uint8Array> {
+async function readBodyCapped(
+  response: Awaited<ReturnType<FetchLike>>,
+  url: string,
+  budget: BufferBudget,
+): Promise<Uint8Array> {
   if (response.body === null) {
     return new Uint8Array(0);
   }
@@ -240,6 +314,7 @@ async function readBodyCapped(response: Awaited<ReturnType<FetchLike>>, url: str
       if (total > MAX_FILE_BYTES) {
         throw new SizeLimitError(`${url}: response exceeds Discord's absolute limit of ${formatMiB(MAX_FILE_BYTES)}`);
       }
+      claimBufferBytes(budget, chunk.byteLength, url);
       chunks.push(chunk);
     }
   } catch (error) {
@@ -325,7 +400,12 @@ function sanitizeFilename(name: string): string {
       visible += char;
     }
   }
-  return visible.trim().slice(0, MAX_FILENAME_LENGTH);
+  const trimmed = visible.trim();
+  if (trimmed.length <= MAX_FILENAME_LENGTH) {
+    return trimmed;
+  }
+  const extension = /\.[A-Za-z0-9]{1,8}$/.exec(trimmed)?.[0] ?? "";
+  return trimmed.slice(0, MAX_FILENAME_LENGTH - extension.length) + extension;
 }
 
 function extensionContentType(name: string): string | undefined {

@@ -68,7 +68,12 @@ async function main(argv: readonly string[]): Promise<number> {
   }
   try {
     const webhookUrl = resolveWebhookUrl(process.env);
-    const files = await resolveInputs(positionals, { nameOverride: values.name });
+    const files = await resolveInputs(positionals, {
+      nameOverride: values.name,
+      onNote: (note) => {
+        console.error(`dwh: ${note}`);
+      },
+    });
     await sendFiles(webhookUrl, files, {
       onNote: (note) => {
         console.error(`dwh: ${note}`);

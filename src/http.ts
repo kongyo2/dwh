@@ -17,6 +17,25 @@ export const proxyAwareFetch: FetchLike = (input, init) => {
   return undiciFetch(input, { dispatcher, ...init });
 };
 
+/** Bounded retry policy shared by URL downloads and webhook delivery. */
+export const MAX_TRANSIENT_ATTEMPTS: number = 5;
+
+const MAX_TRANSIENT_DELAY_MS = 15_000;
+
+export function transientDelayMs(failures: number): number {
+  return Math.min(1000 * 2 ** (failures - 1), MAX_TRANSIENT_DELAY_MS);
+}
+
+export function formatSeconds(ms: number): string {
+  return `${(ms / 1000).toFixed(1)}s`;
+}
+
+export function defaultSleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
 /** One readable line for a failed fetch, surfacing the OS-level cause code when there is one. */
 export function describeFetchError(error: unknown): string {
   if (error instanceof Error) {

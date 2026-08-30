@@ -4,6 +4,7 @@ export {
   isUrl,
   resolveInputs,
   MAX_FILE_BYTES,
+  MAX_TOTAL_BYTES,
   type OutgoingFile,
   type ResolveOptions,
 } from "./inputs.js";

@@ -1,5 +1,13 @@
 import { FormData } from "undici";
-import { describeFetchError, proxyAwareFetch, type FetchLike } from "./http.js";
+import {
+  defaultSleep,
+  describeFetchError,
+  formatSeconds,
+  MAX_TRANSIENT_ATTEMPTS,
+  proxyAwareFetch,
+  transientDelayMs,
+  type FetchLike,
+} from "./http.js";
 import type { OutgoingFile } from "./inputs.js";
 
 export const WEBHOOK_ENV_VARS: readonly ["DWH_WEBHOOK_URL", "DISCORD_WEBHOOK_URL"] = [
@@ -17,8 +25,6 @@ const WEBHOOK_HOSTS = new Set(["discord.com", "ptb.discord.com", "canary.discord
 const WEBHOOK_PATH_PATTERN = /^\/api(?:\/v\d+)?\/webhooks\/\d+\/[\w-]+$/;
 
 const REQUEST_TIMEOUT_MS = 120_000;
-const MAX_TRANSIENT_ATTEMPTS = 5;
-const MAX_TRANSIENT_DELAY_MS = 15_000;
 const MIN_RATE_LIMIT_WAIT_MS = 1_000;
 const MAX_RATE_LIMIT_WAIT_MS = 60_000;
 const RATE_LIMIT_CUSHION_MS = 250;
@@ -175,6 +181,9 @@ async function postBatch(
       continue;
     }
     if (response.status >= 500) {
+      // Cancel the unread body so undici can reuse or close the connection instead of
+      // holding a socket per failed attempt.
+      await response.body?.cancel().catch(() => undefined);
       transientFailures += 1;
       if (transientFailures >= MAX_TRANSIENT_ATTEMPTS) {
         throw new Error(`Discord kept failing (${response.status}) after ${MAX_TRANSIENT_ATTEMPTS} attempts`);
@@ -272,18 +281,4 @@ function parseJson(text: string): unknown {
   } catch {
     return undefined;
   }
-}
-
-function transientDelayMs(failures: number): number {
-  return Math.min(1000 * 2 ** (failures - 1), MAX_TRANSIENT_DELAY_MS);
-}
-
-function formatSeconds(ms: number): string {
-  return `${(ms / 1000).toFixed(1)}s`;
-}
-
-function defaultSleep(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
 }

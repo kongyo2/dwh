@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -7,6 +7,33 @@ import { filenameForDownload, isUrl, resolveInputs } from "../src/inputs.js";
 
 function fetchReturning(response: Response): FetchLike {
   return (async () => response) as unknown as FetchLike;
+}
+
+function fetchSequence(...outcomes: Array<Response | Error>): { calls: number[]; impl: FetchLike } {
+  const calls: number[] = [];
+  const impl = (async () => {
+    calls.push(calls.length + 1);
+    const outcome = outcomes.shift();
+    if (outcome === undefined) {
+      throw new Error("unexpected extra fetch call");
+    }
+    if (outcome instanceof Error) {
+      throw outcome;
+    }
+    return outcome;
+  }) as unknown as FetchLike;
+  return { calls, impl };
+}
+
+function sleepRecorder(): { waits: number[]; sleep: (ms: number) => Promise<void> } {
+  const waits: number[] = [];
+  return {
+    waits,
+    sleep: (ms: number) => {
+      waits.push(ms);
+      return Promise.resolve();
+    },
+  };
 }
 
 async function scratchDir(): Promise<string> {
@@ -126,6 +153,28 @@ describe("resolveInputs with URLs", () => {
     ).rejects.toThrow(/GET https:\/\/example\.com\/flaky\.txt failed while reading the response/);
   });
 
+  it("retries transient download failures with backoff, like delivery does", async () => {
+    const { calls, impl } = fetchSequence(
+      new Error("socket hang up"),
+      new Response("", { status: 502 }),
+      new Response("ok", { status: 200, headers: { "content-type": "text/plain" } }),
+    );
+    const { waits, sleep } = sleepRecorder();
+    const [resolved] = await resolveInputs(["https://example.com/flappy.txt"], { fetchImpl: impl, sleep });
+    expect(resolved?.name).toBe("flappy.txt");
+    expect(calls).toHaveLength(3);
+    expect(waits).toEqual([1000, 2000]);
+  });
+
+  it("gives up on a download after five transient failures", async () => {
+    const { calls, impl } = fetchSequence(...Array.from({ length: 5 }, () => new Response("", { status: 500 })));
+    const { sleep } = sleepRecorder();
+    await expect(resolveInputs(["https://example.com/down.txt"], { fetchImpl: impl, sleep })).rejects.toThrow(
+      /after 5 attempts/,
+    );
+    expect(calls).toHaveLength(5);
+  });
+
   it("rejects a download whose declared size can never fit in Discord", async () => {
     const response = new Response("tiny", {
       status: 200,
@@ -195,6 +244,35 @@ describe("filenameForDownload", () => {
     expect(filenameForDownload("https://example.com/x", 'attachment; filename="../../etc/passwd"', "text/plain")).toBe(
       "passwd.txt",
     );
+  });
+});
+
+describe("aggregate memory bound", () => {
+  it("fails fast when the combined inputs exceed the per-run total", async () => {
+    const dir = await scratchDir();
+    const paths = [];
+    // Six sparse files of 90 MiB each: every one passes the 100 MiB per-file check,
+    // but the 540 MiB total crosses the 512 MiB per-run budget.
+    for (const name of ["a.bin", "b.bin", "c.bin", "d.bin", "e.bin", "f.bin"]) {
+      const path = join(dir, name);
+      await writeFile(path, "");
+      await truncate(path, 90 * 1024 * 1024);
+      paths.push(path);
+    }
+    await expect(resolveInputs(paths)).rejects.toThrow(/combined inputs exceed/);
+  });
+});
+
+describe("filename truncation", () => {
+  it("keeps the extension when shortening very long names", async () => {
+    const longName = `${"a".repeat(200)}.json`;
+    const [resolved] = await resolveInputs(["-"], {
+      nameOverride: longName,
+      readStdin: () => Promise.resolve(new Uint8Array([1])),
+    });
+    expect(resolved?.name.length).toBe(180);
+    expect(resolved?.name.endsWith(".json")).toBe(true);
+    expect(resolved?.contentType).toBe("application/json");
   });
 });
 
