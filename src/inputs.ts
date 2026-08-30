@@ -124,7 +124,10 @@ export function isUrl(spec: string): boolean {
  */
 export async function resolveInputs(specs: readonly string[], options: ResolveOptions = {}): Promise<OutgoingFile[]> {
   const budget: BufferBudget = { used: 0 };
-  const results = await Promise.allSettled(specs.map((spec) => resolveOne(spec, options, budget)));
+  const results = await allSettledBounded(
+    specs.map((spec) => () => resolveOne(spec, options, budget)),
+    CONCURRENT_INPUT_RESOLVERS,
+  );
   const failures: string[] = [];
   const files: OutgoingFile[] = [];
   for (const result of results) {
@@ -150,18 +153,49 @@ async function resolveOne(spec: string, options: ResolveOptions, budget: BufferB
   return readLocalFile(spec, options.nameOverride, budget);
 }
 
+const CONCURRENT_INPUT_RESOLVERS = 8;
+
+/**
+ * Run tasks with bounded concurrency, keeping result order. Hundreds of inputs must not
+ * open every file descriptor and connection at once just because they were listed together.
+ */
+async function allSettledBounded<T>(
+  tasks: ReadonlyArray<() => Promise<T>>,
+  limit: number,
+): Promise<Array<PromiseSettledResult<T>>> {
+  const results = new Array<PromiseSettledResult<T>>(tasks.length);
+  let nextIndex = 0;
+  const workers = Array.from({ length: Math.min(limit, tasks.length) }, async () => {
+    for (;;) {
+      const index = nextIndex;
+      nextIndex += 1;
+      const task = tasks[index];
+      if (task === undefined) {
+        return;
+      }
+      try {
+        results[index] = { status: "fulfilled", value: await task() };
+      } catch (reason) {
+        results[index] = { status: "rejected", reason };
+      }
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
 /** Bytes retained in memory across all concurrently resolving inputs of one run. */
 interface BufferBudget {
   used: number;
 }
 
 function claimBufferBytes(budget: BufferBudget, bytes: number, label: string): void {
-  budget.used += bytes;
-  if (budget.used > MAX_TOTAL_BYTES) {
+  if (budget.used + bytes > MAX_TOTAL_BYTES) {
     throw new SizeLimitError(
       `${label}: combined inputs exceed the ${formatMiB(MAX_TOTAL_BYTES)} dwh holds in memory per run — send fewer or smaller files at once`,
     );
   }
+  budget.used += bytes;
 }
 
 async function readLocalFile(
@@ -194,38 +228,28 @@ async function readLocalFile(
   }
   claimBufferBytes(budget, info.size, path);
   const data = await readFile(path);
+  if (data.byteLength !== info.size) {
+    // The file changed between stat() and the read (say, a log still being written);
+    // the limits must hold for the bytes actually in memory, not the stale stat size.
+    budget.used -= info.size;
+    if (data.byteLength > MAX_FILE_BYTES) {
+      throw new SizeLimitError(
+        `${path}: ${formatMiB(data.byteLength)} exceeds Discord's absolute limit of ${formatMiB(MAX_FILE_BYTES)}`,
+      );
+    }
+    claimBufferBytes(budget, data.byteLength, path);
+  }
   const name = sanitizeFilename(nameOverride ?? basename(path)) || "file";
   return { name, data, contentType: contentTypeForName(name) };
 }
 
 async function download(url: string, options: ResolveOptions, budget: BufferBudget): Promise<OutgoingFile> {
-  const response = await fetchDownload(url, options);
-  if (!response.ok) {
-    throw new Error(`GET ${url} failed: ${response.status} ${response.statusText}`.trimEnd());
-  }
-  const declaredLength = Number(response.headers.get("content-length") ?? "");
-  if (Number.isFinite(declaredLength) && declaredLength > MAX_FILE_BYTES) {
-    throw new Error(
-      `${url}: ${formatMiB(declaredLength)} exceeds Discord's absolute limit of ${formatMiB(MAX_FILE_BYTES)}`,
-    );
-  }
-  const data = await readBodyCapped(response, url, budget);
-  const headerType = normalizeContentType(response.headers.get("content-type"));
-  const overrideName = sanitizeFilename(options.nameOverride ?? "");
-  if (overrideName !== "") {
-    // Like the local-file and stdin paths, --name also decides the content type when its extension is known.
-    return { name: overrideName, data, contentType: extensionContentType(overrideName) ?? headerType };
-  }
-  const name = filenameForDownload(response.url || url, response.headers.get("content-disposition"), headerType);
-  return { name, data, contentType: headerType };
-}
-
-/** GET with the same bounded transient-failure retry policy the webhook delivery uses. */
-async function fetchDownload(url: string, options: ResolveOptions): Promise<Awaited<ReturnType<FetchLike>>> {
   const fetchImpl = options.fetchImpl ?? proxyAwareFetch;
   const sleep = options.sleep ?? defaultSleep;
   const note = options.onNote ?? (() => undefined);
   let transientFailures = 0;
+  // The whole GET — connect, status, and body — sits inside one retry boundary, with the same
+  // bounded transient-failure policy the webhook delivery uses.
   for (;;) {
     let response: Awaited<ReturnType<FetchLike>>;
     try {
@@ -260,7 +284,46 @@ async function fetchDownload(url: string, options: ResolveOptions): Promise<Awai
       await sleep(delayMs);
       continue;
     }
-    return response;
+    if (!response.ok) {
+      throw new Error(`GET ${url} failed: ${response.status} ${response.statusText}`.trimEnd());
+    }
+    const declaredLength = Number(response.headers.get("content-length") ?? "");
+    if (Number.isFinite(declaredLength) && declaredLength > MAX_FILE_BYTES) {
+      throw new Error(
+        `${url}: ${formatMiB(declaredLength)} exceeds Discord's absolute limit of ${formatMiB(MAX_FILE_BYTES)}`,
+      );
+    }
+    let data: Uint8Array;
+    try {
+      data = await readBodyCapped(response, url, budget);
+    } catch (error) {
+      if (error instanceof SizeLimitError) {
+        throw error;
+      }
+      // A body that dies mid-stream is as transient as a failed connect; a fresh GET restarts it
+      // (readBodyCapped has already handed the failed attempt's bytes back to the budget).
+      transientFailures += 1;
+      if (transientFailures >= MAX_TRANSIENT_ATTEMPTS) {
+        throw new Error(
+          `GET ${url} failed while reading the response: ${describeFetchError(error)} (after ${MAX_TRANSIENT_ATTEMPTS} attempts)`,
+          { cause: error },
+        );
+      }
+      const delayMs = transientDelayMs(transientFailures);
+      note(
+        `GET ${url} failed while reading the response (${describeFetchError(error)}) — retrying in ${formatSeconds(delayMs)}`,
+      );
+      await sleep(delayMs);
+      continue;
+    }
+    const headerType = normalizeContentType(response.headers.get("content-type"));
+    const overrideName = sanitizeFilename(options.nameOverride ?? "");
+    if (overrideName !== "") {
+      // Like the local-file and stdin paths, --name also decides the content type when its extension is known.
+      return { name: overrideName, data, contentType: extensionContentType(overrideName) ?? headerType };
+    }
+    const name = filenameForDownload(response.url || url, response.headers.get("content-disposition"), headerType);
+    return { name, data, contentType: headerType };
   }
 }
 
@@ -308,6 +371,7 @@ async function readBodyCapped(
   }
   const chunks: Uint8Array[] = [];
   let total = 0;
+  let claimed = 0;
   try {
     for await (const chunk of response.body) {
       total += chunk.byteLength;
@@ -315,15 +379,20 @@ async function readBodyCapped(
         throw new SizeLimitError(`${url}: response exceeds Discord's absolute limit of ${formatMiB(MAX_FILE_BYTES)}`);
       }
       claimBufferBytes(budget, chunk.byteLength, url);
+      claimed += chunk.byteLength;
       chunks.push(chunk);
     }
+    // Concatenating briefly doubles this download's bytes, so that peak counts against the
+    // run budget too; the chunk copies' share is handed back once the result buffer exists.
+    claimBufferBytes(budget, total, url);
+    const data = Buffer.concat(chunks);
+    budget.used -= total;
+    return data;
   } catch (error) {
-    if (error instanceof SizeLimitError) {
-      throw error;
-    }
-    throw new Error(`GET ${url} failed while reading the response: ${describeFetchError(error)}`, { cause: error });
+    // A failed attempt retains nothing, so its claim goes back (a retry claims afresh).
+    budget.used -= claimed;
+    throw error;
   }
-  return Buffer.concat(chunks);
 }
 
 /** Derive the filename Discord will show for a downloaded URL. Exported for tests. */
@@ -405,7 +474,16 @@ function sanitizeFilename(name: string): string {
     return trimmed;
   }
   const extension = /\.[A-Za-z0-9]{1,8}$/.exec(trimmed)?.[0] ?? "";
-  return trimmed.slice(0, MAX_FILENAME_LENGTH - extension.length) + extension;
+  const stemBudget = MAX_FILENAME_LENGTH - extension.length;
+  // Cut between code points, not UTF-16 units — a split surrogate pair would corrupt the name.
+  let stem = "";
+  for (const char of trimmed) {
+    if (stem.length + char.length > stemBudget) {
+      break;
+    }
+    stem += char;
+  }
+  return stem + extension;
 }
 
 function extensionContentType(name: string): string | undefined {

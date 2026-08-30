@@ -36,6 +36,16 @@ function sleepRecorder(): { waits: number[]; sleep: (ms: number) => Promise<void
   };
 }
 
+function failingBodyResponse(): Response {
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode("partial"));
+      controller.error(new Error("terminated"));
+    },
+  });
+  return new Response(body, { status: 200, headers: { "content-type": "text/plain" } });
+}
+
 async function scratchDir(): Promise<string> {
   return mkdtemp(join(tmpdir(), "dwh-test-"));
 }
@@ -140,17 +150,26 @@ describe("resolveInputs with URLs", () => {
     expect(resolved?.contentType).toBe("text/plain");
   });
 
-  it("names the URL when the response body fails mid-read", async () => {
-    const body = new ReadableStream<Uint8Array>({
-      start(controller) {
-        controller.enqueue(new TextEncoder().encode("partial"));
-        controller.error(new Error("terminated"));
-      },
-    });
-    const response = new Response(body, { status: 200, headers: { "content-type": "text/plain" } });
-    await expect(
-      resolveInputs(["https://example.com/flaky.txt"], { fetchImpl: fetchReturning(response) }),
-    ).rejects.toThrow(/GET https:\/\/example\.com\/flaky\.txt failed while reading the response/);
+  it("retries a body that dies mid-stream with a fresh GET", async () => {
+    const { calls, impl } = fetchSequence(
+      failingBodyResponse(),
+      new Response("hello", { status: 200, headers: { "content-type": "text/plain" } }),
+    );
+    const { waits, sleep } = sleepRecorder();
+    const [resolved] = await resolveInputs(["https://example.com/flaky.txt"], { fetchImpl: impl, sleep });
+    expect(Buffer.from(resolved?.data ?? new Uint8Array()).toString()).toBe("hello");
+    expect(calls).toHaveLength(2);
+    expect(waits).toEqual([1000]);
+  });
+
+  it("names the URL when the response body keeps failing mid-read", async () => {
+    const { calls, impl } = fetchSequence(...Array.from({ length: 5 }, () => failingBodyResponse()));
+    const { waits, sleep } = sleepRecorder();
+    await expect(resolveInputs(["https://example.com/flaky.txt"], { fetchImpl: impl, sleep })).rejects.toThrow(
+      /GET https:\/\/example\.com\/flaky\.txt failed while reading the response: .* \(after 5 attempts\)/,
+    );
+    expect(calls).toHaveLength(5);
+    expect(waits).toEqual([1000, 2000, 4000, 8000]);
   });
 
   it("retries transient download failures with backoff, like delivery does", async () => {
@@ -263,6 +282,18 @@ describe("aggregate memory bound", () => {
   });
 });
 
+describe("bounded concurrent resolution", () => {
+  it("preserves input order with more inputs than workers", async () => {
+    const dir = await scratchDir();
+    const names = Array.from({ length: 20 }, (_, index) => `f${String(index).padStart(2, "0")}.txt`);
+    for (const name of names) {
+      await writeFile(join(dir, name), name);
+    }
+    const resolved = await resolveInputs(names.map((name) => join(dir, name)));
+    expect(resolved.map((entry) => entry.name)).toEqual(names);
+  });
+});
+
 describe("filename truncation", () => {
   it("keeps the extension when shortening very long names", async () => {
     const longName = `${"a".repeat(200)}.json`;
@@ -273,6 +304,22 @@ describe("filename truncation", () => {
     expect(resolved?.name.length).toBe(180);
     expect(resolved?.name.endsWith(".json")).toBe(true);
     expect(resolved?.contentType).toBe("application/json");
+  });
+
+  it("never splits a surrogate pair at the truncation boundary", async () => {
+    const longName = `${"🎉".repeat(120)}.png`;
+    const [resolved] = await resolveInputs(["-"], {
+      nameOverride: longName,
+      readStdin: () => Promise.resolve(new Uint8Array([1])),
+    });
+    const name = resolved?.name ?? "";
+    expect(name.endsWith(".png")).toBe(true);
+    expect(name.length).toBeLessThanOrEqual(180);
+    const stem = name.slice(0, -".png".length);
+    const lastUnit = stem.charCodeAt(stem.length - 1);
+    const endsOnLoneHighSurrogate = lastUnit >= 0xd800 && lastUnit <= 0xdbff;
+    expect(endsOnLoneHighSurrogate).toBe(false);
+    expect(resolved?.contentType).toBe("image/png");
   });
 });
 

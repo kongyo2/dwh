@@ -62,7 +62,8 @@ dwh <file|url|-> [more...] [--name <filename>]
 - Rate limiting: on 429, dwh waits what Discord asks (1–60 s per wait, then re-checks) for as long as it takes. After a message that spends the remaining rate-limit budget, dwh pauses before the next one instead of provoking the 429 at all.
 - Network errors and 5xx responses — on URL downloads and Discord delivery alike — are retried up to 5 attempts with exponential backoff, then reported as real errors.
 - Delivery is at-least-once: if the connection drops after Discord already accepted a message, the retry can — rarely — duplicate it. Discord webhooks offer no idempotency key, and dwh prefers a possible duplicate over a silent loss.
-- Inputs are buffered in memory before sending; one run holds at most 512 MiB combined and fails fast beyond that.
+- Inputs resolve concurrently but boundedly (8 at a time), preserving order, so hundreds of inputs cannot exhaust file descriptors or connections.
+- Inputs are buffered in memory before sending; one run holds at most 512 MiB combined — transient assembly peaks included — and fails fast beyond that.
 - A file over 100 MiB fails fast; no Discord server accepts one. Between 10 and 100 MiB it depends on the server's boost tier — Discord decides, dwh relays a clear error.
 - Downloaded files are named from `Content-Disposition` or the URL path; when the name has no extension, one is added from the content type.
 - The webhook URL is validated up front, so a misconfigured variable fails with instructions instead of a confusing HTTP error.
