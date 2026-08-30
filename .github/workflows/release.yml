@@ -1,0 +1,53 @@
+name: Release
+
+# Manually triggered: bumps the version, tags, and publishes to npm.
+# Requires the NPM_TOKEN repository secret (an npm automation token with
+# publish rights on the @kongyo2 scope).
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Version bump (none publishes package.json's version as-is)"
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+          - none
+        default: patch
+
+permissions:
+  contents: write
+
+concurrency: release
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          registry-url: https://registry.npmjs.org
+
+      - run: npm ci
+
+      - run: npm run verify
+
+      - name: Bump version and push the tag
+        if: ${{ inputs.bump != 'none' }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          npm version "${{ inputs.bump }}" -m "release: v%s"
+          git push origin HEAD --follow-tags
+
+      # prepublishOnly re-runs the full verify against the exact tree being published
+      - name: Publish to npm
+        run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
