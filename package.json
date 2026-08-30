@@ -1,0 +1,72 @@
+{
+  "name": "@kongyo2/dwh",
+  "version": "0.1.0",
+  "description": "Deliver files from a coding agent to a human over a Discord webhook. Files only — no messages, and rate limits are waited out, never surfaced.",
+  "keywords": [
+    "cli",
+    "discord",
+    "webhook",
+    "file-transfer",
+    "artifacts",
+    "ai",
+    "agent",
+    "coding-agents",
+    "claude-code"
+  ],
+  "license": "MIT",
+  "author": "kongyo2",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kongyo2/dwh.git"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=20.18.1"
+  },
+  "bin": {
+    "dwh": "./dist/cli.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --pretty false",
+    "typecheck": "tsc --noEmit --pretty false",
+    "typecheck:test": "tsc -p tsconfig.test.json --pretty false",
+    "lint": "oxlint --deny-warnings --format agent",
+    "lint:fix": "oxlint --fix --deny-warnings --format agent",
+    "lint:types": "oxlint --type-aware --type-check --deny-warnings --format agent",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run",
+    "check": "npm run typecheck && npm run typecheck:test && npm run lint && npm run format:check && npm test",
+    "check:package": "attw --pack . --profile esm-only && publint --strict",
+    "verify": "npm run check && npm run lint:types && npm run build && npm run check:package",
+    "prepublishOnly": "npm run verify"
+  },
+  "dependencies": {
+    "undici": "^7.29.0"
+  },
+  "devDependencies": {
+    "@arethetypeswrong/cli": "^0.18.5",
+    "@types/node": "^20.19.0",
+    "oxlint": "^1.80.0",
+    "oxlint-tsgolint": "^7.0.2001",
+    "prettier": "^3.9.6",
+    "publint": "^0.3.24",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.11"
+  }
+}
