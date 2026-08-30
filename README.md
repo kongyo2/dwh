@@ -103,10 +103,6 @@ npm run verify   # check + type-aware lint + build + package checks
 
 CI runs `npm run verify` on Node 20, 22, and 24, smoke-runs the built CLI, and installs the packed tarball into a scratch consumer.
 
-## Release
-
-Manual, from the repository's Actions tab: run the **Release** workflow and pick the bump (patch / minor / major, or `none` to publish the current version as-is). It verifies everything, bumps `package.json`, tags, pushes, and publishes to npm. Requires the `NPM_TOKEN` repository secret — an npm automation token allowed to publish in the `@kongyo2` scope.
-
 ## License
 
 MIT
