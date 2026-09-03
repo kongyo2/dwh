@@ -1,6 +1,13 @@
 import { readFile, stat } from "node:fs/promises";
 import { basename, dirname } from "node:path";
-import { adviceDiagnostic, DiagnosticError, diagnosticsOf, errorDiagnostic, type Diagnostic } from "./diagnostics.js";
+import {
+  adviceDiagnostic,
+  DiagnosticError,
+  diagnosticsOf,
+  errorDiagnostic,
+  scrubDiagnostic,
+  type Diagnostic,
+} from "./diagnostics.js";
 import {
   defaultSleep,
   describeFetchError,
@@ -11,6 +18,7 @@ import {
   type FetchLike,
 } from "./http.js";
 import { formatMiB, shellQuote } from "./text.js";
+import { isWebhookUrl } from "./webhook.js";
 import { wordingFor, type Wording } from "./wording.js";
 
 /** A file ready to be attached to a message. */
@@ -131,10 +139,18 @@ export function isUrl(spec: string): boolean {
  * Every failing input is reported (one diagnostic each), not just the first one.
  */
 export async function resolveInputs(specs: readonly string[], options: ResolveOptions = {}): Promise<OutgoingFile[]> {
+  const wording = wordingFor(options.hideDestination);
+  const onDiagnostic = options.onDiagnostic;
   const context: ResolveContext = {
     options,
-    wording: wordingFor(options.hideDestination),
+    wording,
     budget: { used: 0 },
+    // Notes and thrown diagnostics alike reach the caller scrubbed: an input that is itself a
+    // webhook URL must not leak its token, and in hidden mode it must not name the service.
+    emit:
+      onDiagnostic === undefined
+        ? () => undefined
+        : (diagnostic) => onDiagnostic(scrubDiagnostic(diagnostic, wording.scrub)),
   };
   const results = await allSettledBounded(
     specs.map((spec) => () => resolveOne(spec, context)),
@@ -146,7 +162,9 @@ export async function resolveInputs(specs: readonly string[], options: ResolveOp
     if (result.status === "fulfilled") {
       files.push(result.value);
     } else {
-      failures.push(...diagnosticsOf(result.reason, locationOf(specs[index] ?? "")));
+      for (const diagnostic of diagnosticsOf(result.reason, locationOf(specs[index] ?? ""))) {
+        failures.push(scrubDiagnostic(diagnostic, wording.scrub));
+      }
     }
   }
   if (failures.length > 0) {
@@ -159,6 +177,7 @@ interface ResolveContext {
   readonly options: ResolveOptions;
   readonly wording: Wording;
   readonly budget: BufferBudget;
+  readonly emit: (diagnostic: Diagnostic) => void;
 }
 
 function locationOf(spec: string): string {
@@ -170,6 +189,18 @@ async function resolveOne(spec: string, context: ResolveContext): Promise<Outgoi
     return resolveStdin(context);
   }
   if (isUrl(spec)) {
+    if (isWebhookUrl(spec)) {
+      // Downloading the webhook itself would fetch the webhook object, token included, and
+      // post it into the channel as a file. Nobody means that.
+      throw new DiagnosticError([
+        errorDiagnostic(
+          spec,
+          "download-failed",
+          "refusing to download this URL: it is the delivery destination itself, not a file to deliver",
+          "pass the file you want delivered, e.g. dwh ./report.md",
+        ),
+      ]);
+    }
     return download(spec, context);
   }
   return readLocalFile(spec, context);
@@ -236,37 +267,42 @@ function tooLarge(location: string, actual: number, wording: Wording, splitSourc
   ]);
 }
 
+/** A path that could not be stat'ed or read: a vanished path is `not-found`, anything else `unreadable`. */
+function readFailure(path: string, error: unknown): DiagnosticError {
+  const code = error instanceof Error ? (error as NodeJS.ErrnoException).code : undefined;
+  if (code === "ENOENT" || code === "ENOTDIR") {
+    return new DiagnosticError(
+      [
+        errorDiagnostic(
+          path,
+          "not-found",
+          "no such file",
+          `check the path (ls -la ${shellQuote(dirname(path))}); a URL must start with http:// or https://`,
+        ),
+      ],
+      { cause: error },
+    );
+  }
+  return new DiagnosticError(
+    [
+      errorDiagnostic(
+        path,
+        "unreadable",
+        `cannot read (${code ?? describeFetchError(error)})`,
+        `check permissions: ls -la ${shellQuote(path)}`,
+      ),
+    ],
+    { cause: error },
+  );
+}
+
 async function readLocalFile(path: string, context: ResolveContext): Promise<OutgoingFile> {
   const { budget, wording } = context;
   let info;
   try {
     info = await stat(path);
   } catch (error) {
-    const code = error instanceof Error ? (error as NodeJS.ErrnoException).code : undefined;
-    if (code === "ENOENT" || code === "ENOTDIR") {
-      throw new DiagnosticError(
-        [
-          errorDiagnostic(
-            path,
-            "not-found",
-            "no such file",
-            `check the path (ls -la ${shellQuote(dirname(path))}); a URL must start with http:// or https://`,
-          ),
-        ],
-        { cause: error },
-      );
-    }
-    throw new DiagnosticError(
-      [
-        errorDiagnostic(
-          path,
-          "unreadable",
-          `cannot read (${code ?? describeFetchError(error)})`,
-          `check permissions: ls -la ${shellQuote(path)}`,
-        ),
-      ],
-      { cause: error },
-    );
+    throw readFailure(path, error);
   }
   if (info.isDirectory()) {
     const archive = `${basename(path) || "archive"}.zip`;
@@ -295,7 +331,15 @@ async function readLocalFile(path: string, context: ResolveContext): Promise<Out
     throw tooLarge(path, info.size, wording, path);
   }
   claimBufferBytes(budget, info.size, path);
-  const data = await readFile(path);
+  let data: Buffer;
+  try {
+    data = await readFile(path);
+  } catch (error) {
+    // stat() succeeding says nothing about the contents being readable (mode 000, a file
+    // that vanished in between, an I/O error), so this failure is classified the same way.
+    budget.used -= info.size;
+    throw readFailure(path, error);
+  }
   if (data.byteLength !== info.size) {
     // The file changed between stat() and the read (say, a log still being written);
     // the limits must hold for the bytes actually in memory, not the stale stat size.
@@ -310,10 +354,9 @@ async function readLocalFile(path: string, context: ResolveContext): Promise<Out
 }
 
 async function download(url: string, context: ResolveContext): Promise<OutgoingFile> {
-  const { options, budget, wording } = context;
+  const { options, budget, wording, emit } = context;
   const fetchImpl = options.fetchImpl ?? proxyAwareFetch;
   const sleep = options.sleep ?? defaultSleep;
-  const emit = options.onDiagnostic ?? (() => undefined);
   const checkHelp = `check the URL (curl -sSI ${shellQuote(url)}); it must be reachable without credentials from this machine`;
   const giveUpHelp = `the server may be down; retry later, or download it yourself and send the file`;
   let transientFailures = 0;

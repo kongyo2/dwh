@@ -24,9 +24,16 @@ structured output) and the compact single-line diagnostic format.
   Running `dwh` with piped stdin but no `-` says so.
 - Error-code-specific hints: 40005 / 413 (names the largest file), 10015 / 50027 / 401 / 403 / 404
   (bad destination), 10003 (stale `thread_id`), 50035 (invalid form body).
-- Library: `run`, `checkWebhook`, `resolveWebhookConfig`, `DiagnosticError`, `formatDiagnostic`,
-  `diagnosticsOf`, `wordingFor`, `hideDestinationFrom`, `neutralize`; `sendFiles` returns a
-  `SendResult` with one `Delivery` per file (message id, attachment id, URL).
+- Library: `run`, `checkWebhook`, `resolveWebhookConfig`, `isWebhookUrl`, `DiagnosticError`,
+  `formatDiagnostic`, `scrubDiagnostic`, `diagnosticsOf`, `wordingFor`, `hideDestinationFrom`,
+  `neutralize`; `sendFiles` returns a `SendResult` with one `Delivery` per file (message id,
+  attachment id, URL). Diagnostics and notes reach callers scrubbed (tokens redacted, the service
+  unnamed when hidden), and `sendFiles` / `checkWebhook` validate their URL, throwing
+  `invalid-config` instead of a raw `TypeError`.
+- A webhook URL given as an input is refused instead of downloaded (that would post the webhook
+  object, token included, into the channel).
+- A file whose contents cannot be read even though it exists (mode 000, an I/O error) is reported
+  as `unreadable` with the permission hint, not as `internal`.
 
 ### Changed
 

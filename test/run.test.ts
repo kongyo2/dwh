@@ -265,6 +265,40 @@ describe("send", () => {
     });
   });
 
+  it("scrubs every printed string when the destination is hidden, plain lines and JSON alike", async () => {
+    const source = "https://cdn.discordapp.com/attachments/1/2/discord-export.zip";
+    const download = (): Response =>
+      new Response("zip", { status: 200, headers: { "content-type": "application/zip" } });
+    const plain = await cli([source], { env: hiddenConfigured, responses: [download(), message()] });
+    expect(plain.code).toBe(0);
+    expect(plain.stdout).toEqual(["sent the destination-export.zip (3 B)"]);
+    const json = await cli([source, "--json"], { env: hiddenConfigured, responses: [download(), message()] });
+    const payload = parseJsonLine(json.stdout);
+    expect(payload["ok"]).toBe(true);
+    expect((payload["files"] as Array<Record<string, unknown>>)[0]?.["source"]).toBe("<destination>");
+    expect(json.stdout.join("\n")).not.toMatch(FORBIDDEN);
+  });
+
+  it("refuses a webhook URL as an input and never prints its token", async () => {
+    const { code, stdout, stderr, calls } = await cli(["https://discord.com/api/webhooks/1/secret-token", "--json"], {
+      env: configured,
+    });
+    expect(code).toBe(1);
+    expect(calls).toEqual([]);
+    expect(stderr).toEqual([]);
+    const payload = parseJsonLine(stdout);
+    expect(payload["ok"]).toBe(false);
+    expect((payload["diagnostics"] as Array<Record<string, unknown>>)[0]).toMatchObject({
+      location: "https://discord.com/api/webhooks/1/<token>",
+      code: "download-failed",
+    });
+    expect(stdout.join("\n")).not.toContain("secret-token");
+    const hidden = await cli(["https://discord.com/api/webhooks/1/secret-token"], { env: hiddenConfigured });
+    expect(hidden.stderr).toEqual([
+      "<destination>: error dwh(download-failed): refusing to download this URL: it is the delivery destination itself, not a file to deliver help: pass the file you want delivered, e.g. dwh ./report.md",
+    ]);
+  });
+
   it("leaves the attachment URL out of the JSON when the destination is hidden", async () => {
     const path = await scratchFile("report.md", "# hi");
     const url = "https://cdn.discordapp.com/attachments/c1/a1/report.md";
@@ -524,6 +558,20 @@ describe("hidden destination sweep", () => {
       [["check", "--json"], { env, responses: [webhookObject("Discord Webhook Bot")] }],
       [["check"], { env, responses: [rejection(401, { message: "Invalid Webhook Token", code: 50027 })] }],
       [["check"], { env, responses: Array.from({ length: 5 }, () => new Error(`fetch failed ${WEBHOOK}`)) }],
+      [
+        ["https://cdn.discordapp.com/attachments/1/2/discord.png"],
+        { env, responses: [new Response("png", { status: 200, headers: { "content-type": "image/png" } }), message()] },
+      ],
+      [
+        ["https://cdn.discordapp.com/attachments/1/2/discord.png", "--json"],
+        { env, responses: [new Response("png", { status: 200, headers: { "content-type": "image/png" } }), message()] },
+      ],
+      [
+        ["https://cdn.discordapp.com/attachments/1/2/gone.png"],
+        { env, responses: [new Response("", { status: 404 })] },
+      ],
+      [["https://discord.com/api/webhooks/1/secret-token", "--dry-run"], { env }],
+      [[join(dir, "discord webhook notes.txt")], { env }],
     ];
     for (const [argv, scenario] of scenarios) {
       const { stdout, stderr } = await cli(argv, scenario);

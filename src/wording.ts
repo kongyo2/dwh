@@ -51,15 +51,21 @@ export function redactWebhookTokens(text: string): string {
 // The token part also accepts "<token>", so text that was redacted first still collapses to one placeholder.
 const WEBHOOK_URL_PATTERN =
   /https?:\/\/(?:[\w-]+\.)*discord(?:app)?\.com\/api\/(?:v\d+\/)?webhooks\/\d+\/(?:[\w-]+|<token>)(?:\?[^\s"'<>)]*)?/gi;
+// Any other URL on the service's hosts (CDN attachments, message links) is replaced whole as well.
+const SERVICE_URL_PATTERN = /https?:\/\/(?:[\w-]+\.)*discord(?:app)?\.com(?::\d+)?(?:\/[^\s"'<>)]*)?/gi;
 const CONFIG_VAR_PATTERN = /\b(?:DWH|DISCORD)_WEBHOOK_URL\b/g;
 const HOST_PATTERN = /\b(?:[\w-]+\.)*discord(?:app)?\.com\b/gi;
 const DISCORD_PATTERN = /\bdiscord\b/gi;
 const WEBHOOK_PATTERN = /\bwebhooks?\b/gi;
 
-/** Strip every trace of the service from text that may have come from the network. */
+/**
+ * Strip every trace of the service from text, whether it came from the network, from the
+ * configuration, or from an input that happens to name the service (a CDN URL, a filename).
+ */
 export function neutralize(text: string): string {
   return text
     .replace(WEBHOOK_URL_PATTERN, "<destination>")
+    .replace(SERVICE_URL_PATTERN, "<destination>")
     .replace(CONFIG_VAR_PATTERN, "the dwh configuration")
     .replace(HOST_PATTERN, "the destination")
     .replace(DISCORD_PATTERN, "the destination")

@@ -5,6 +5,7 @@ import type { FetchLike } from "../src/http.js";
 import type { OutgoingFile } from "../src/inputs.js";
 import {
   checkWebhook,
+  isWebhookUrl,
   MAX_FILES_PER_MESSAGE,
   planBatches,
   redactWebhookTokens,
@@ -476,6 +477,34 @@ describe("checkWebhook", () => {
     const { sleep } = sleepRecorder();
     const info = await checkWebhook(WEBHOOK, { fetchImpl: impl, sleep });
     expect(info).toEqual({ id: undefined, name: undefined, type: undefined, channelId: undefined, guildId: undefined });
+  });
+});
+
+describe("direct URLs", () => {
+  it("rejects a malformed or foreign URL with an invalid-config diagnostic, before any request", async () => {
+    for (const bad of ["garbage", "https://example.com/api/webhooks/1/t", "http://discord.com/api/webhooks/1/t"]) {
+      const { calls, impl } = queueFetch();
+      const { sleep } = sleepRecorder();
+      const checkError = await rejectionOf(checkWebhook(bad, { fetchImpl: impl, sleep }));
+      expect(checkError.message).toMatch(
+        /^dwh: error dwh\(invalid-config\): the webhook URL is not a (valid|Discord webhook) URL help: /,
+      );
+      const sendError = await rejectionOf(sendFiles(bad, [file("a.txt")], { fetchImpl: impl, sleep }));
+      expect(sendError.message).toContain("dwh(invalid-config)");
+      expect(calls).toHaveLength(0);
+    }
+    const hidden = await rejectionOf(checkWebhook("garbage", { hideDestination: true }));
+    expect(hidden.message).toContain("dwh(invalid-config)");
+    expect(hidden.message).not.toMatch(FORBIDDEN);
+  });
+
+  it("recognizes webhook URLs", () => {
+    expect(isWebhookUrl(WEBHOOK)).toBe(true);
+    expect(isWebhookUrl(`${WEBHOOK}?thread_id=1`)).toBe(true);
+    expect(isWebhookUrl("https://ptb.discord.com/api/v10/webhooks/1/t-t")).toBe(true);
+    expect(isWebhookUrl("https://cdn.discordapp.com/attachments/1/2/a.png")).toBe(false);
+    expect(isWebhookUrl("https://example.com/api/webhooks/1/t")).toBe(false);
+    expect(isWebhookUrl("not a url")).toBe(false);
   });
 });
 

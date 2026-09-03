@@ -181,7 +181,7 @@ A nonzero exit is a real failure: the diagnostic says what to change. Rate limit
 - Inputs are buffered in memory before sending; one run holds at most 512 MiB combined, transient assembly peaks included, and fails fast beyond that.
 - A file over 100 MiB fails fast; no Discord server accepts one. Between 10 and 100 MiB it depends on the server's boost tier: Discord decides, dwh relays a diagnostic naming the largest file.
 - Downloaded files are named from `Content-Disposition` or the URL path; when the name has no extension, one is added from the content type.
-- Webhook tokens never appear in any output, not even inside error text echoed from the network.
+- Webhook tokens never appear in any output, not even inside error text echoed from the network. A webhook URL given as an input is refused rather than downloaded (that would post the webhook object, token included, into the channel).
 - Nothing is interactive: no prompts, no confirmations, no TTY detection beyond refusing `-` when stdin is a terminal.
 
 ## Hiding the destination
@@ -190,7 +190,7 @@ A nonzero exit is a real failure: the diagnostic says what to change. Rate limit
 export DWH_HIDE_DESTINATION=1     # 1, true, yes, or on
 ```
 
-With this set, every word dwh emits is neutral: help pages describe delivering files "to the user", errors talk about "the destination", the `Configuration` section of the help disappears (the user has already configured it; nothing on the agent's side needs changing), `check` prints only `destination: ok`, `--json` omits the attachment URL, and any webhook URL or hostname that turns up in text from the network is replaced with `<destination>`. The words "Discord" and "webhook" do not occur in any output, in any mode of failure; the test suite sweeps for them.
+With this set, every word dwh emits is neutral: help pages describe delivering files "to the user", errors talk about "the destination", the `Configuration` section of the help disappears (the user has already configured it; nothing on the agent's side needs changing), `check` prints only `destination: ok`, `--json` omits the attachment URL, and any Discord URL or hostname that turns up anywhere (text from the network, an input that is a CDN link, a `source` field in JSON) is replaced with `<destination>`. Every string dwh prints passes through the same scrub, so a filename that contains those words is displayed neutralized too (the delivered file keeps its real name). The words "Discord" and "webhook" do not occur in any output, in any mode of failure; the test suite sweeps for them.
 
 Why: an agent that reads "Discord webhook" in a help page or an error often gets overprotective (it is a private server with one member), or paternalistic (it goes and reads the tool's source before running it, spending tokens and not delivering the file). Hidden mode removes the trigger. It cannot hide what the agent digs up on its own, such as the value of `DWH_WEBHOOK_URL` in the environment, but nothing dwh prints will point it there.
 
@@ -234,7 +234,7 @@ const result = await sendFiles(webhookUrl, files, {
 console.log(`${result.deliveries.length} files in ${result.messages} messages`);
 ```
 
-Every error thrown is a `DiagnosticError`; its `diagnostics` array holds the structured entries and its `message` is the formatted lines. Pass `hideDestination: true` to `resolveInputs`, `sendFiles`, or `checkWebhook` for neutral wording, or run the whole CLI in-process with `run(argv, io)`.
+Every error thrown is a `DiagnosticError`; its `diagnostics` array holds the structured entries and its `message` is the formatted lines. Diagnostics and notes reach library callers scrubbed exactly like the CLI's output (tokens redacted, and the service unnamed under `hideDestination: true`), and `sendFiles` and `checkWebhook` validate the URL they are given, throwing `invalid-config` for anything that is not a Discord webhook URL. Pass `hideDestination: true` to `resolveInputs`, `sendFiles`, or `checkWebhook` for neutral wording, or run the whole CLI in-process with `run(argv, io)`.
 
 ## Development
 

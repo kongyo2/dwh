@@ -3,6 +3,7 @@ export {
   DiagnosticError,
   diagnosticsOf,
   formatDiagnostic,
+  scrubDiagnostic,
   type Diagnostic,
   type DiagnosticCode,
   type Severity,
@@ -20,6 +21,7 @@ export {
 export { EXIT_FAILURE, EXIT_OK, EXIT_USAGE, run, type RunIo } from "./run.js";
 export {
   checkWebhook,
+  isWebhookUrl,
   planBatches,
   redactWebhookTokens,
   resolveWebhookConfig,

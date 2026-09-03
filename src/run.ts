@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { parseArgs } from "node:util";
-import { diagnosticsOf, errorDiagnostic, formatDiagnostic, type Diagnostic } from "./diagnostics.js";
+import { diagnosticsOf, errorDiagnostic, formatDiagnostic, scrubDiagnostic, type Diagnostic } from "./diagnostics.js";
 import type { FetchLike } from "./http.js";
 import { resolveInputs, type OutgoingFile } from "./inputs.js";
 import { formatBytes, plural, shellQuote } from "./text.js";
@@ -135,17 +135,19 @@ interface Reporter {
   ) => number;
 }
 
+/**
+ * Every byte the CLI prints passes through the wording's scrub: plain lines, advice, JSON
+ * payloads (each string value), and diagnostics. Producers scrub too; this is the last line.
+ */
 function makeReporter(io: RunIo, wording: Wording, json: boolean, quiet: boolean): Reporter {
-  const scrub = (diagnostic: Diagnostic): Diagnostic => ({
-    ...diagnostic,
-    location: wording.scrub(diagnostic.location),
-    message: wording.scrub(diagnostic.message),
-    help: diagnostic.help === undefined ? undefined : wording.scrub(diagnostic.help),
-  });
+  const scrub = (diagnostic: Diagnostic): Diagnostic => scrubDiagnostic(diagnostic, wording.scrub);
+  const emitJson = (payload: Readonly<Record<string, unknown>>): void => {
+    io.stdout(JSON.stringify(scrubValue(payload, wording.scrub)));
+  };
   return {
     line: (text) => {
       if (!json && !quiet) {
-        io.stdout(text);
+        io.stdout(wording.scrub(text));
       }
     },
     advice: (diagnostic) => {
@@ -155,14 +157,14 @@ function makeReporter(io: RunIo, wording: Wording, json: boolean, quiet: boolean
     },
     succeed: (payload) => {
       if (json) {
-        io.stdout(JSON.stringify({ ok: true, ...payload }));
+        emitJson({ ok: true, ...payload });
       }
       return EXIT_OK;
     },
     fail: (diagnostics, exitCode, payload = {}) => {
       const scrubbed = diagnostics.map(scrub);
       if (json) {
-        io.stdout(JSON.stringify({ ok: false, ...payload, diagnostics: scrubbed.map(jsonDiagnostic) }));
+        emitJson({ ok: false, ...payload, diagnostics: scrubbed.map(jsonDiagnostic) });
       } else {
         for (const diagnostic of scrubbed) {
           io.stderr(formatDiagnostic(diagnostic));
@@ -171,6 +173,24 @@ function makeReporter(io: RunIo, wording: Wording, json: boolean, quiet: boolean
       return exitCode;
     },
   };
+}
+
+/** Every string anywhere in a JSON payload passes through `scrub`; keys, numbers, booleans, and nulls stay. */
+function scrubValue(value: unknown, scrub: (text: string) => string): unknown {
+  if (typeof value === "string") {
+    return scrub(value);
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry: unknown) => scrubValue(entry, scrub));
+  }
+  if (isRecord(value)) {
+    return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, scrubValue(entry, scrub)]));
+  }
+  return value;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
 function jsonDiagnostic(diagnostic: Diagnostic): Record<string, unknown> {

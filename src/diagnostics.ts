@@ -64,6 +64,16 @@ export function adviceDiagnostic(location: string, code: DiagnosticCode, message
   return { location, severity: "advice", code, message, help };
 }
 
+/** The same diagnostic with every free-text field (location, message, help) passed through `scrub`. */
+export function scrubDiagnostic(diagnostic: Diagnostic, scrub: (text: string) => string): Diagnostic {
+  return {
+    ...diagnostic,
+    location: scrub(diagnostic.location),
+    message: scrub(diagnostic.message),
+    help: diagnostic.help === undefined ? undefined : scrub(diagnostic.help),
+  };
+}
+
 /**
  * An error carrying one or more diagnostics. `message` is the formatted lines joined by
  * newlines, so a consumer that only logs `error.message` still gets the compact format.

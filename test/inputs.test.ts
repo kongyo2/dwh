@@ -1,4 +1,4 @@
-import { mkdtemp, truncate, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -427,5 +427,65 @@ describe("resolveInputs with stdin", () => {
       resolveInputs(["-"], { readStdin: () => Promise.reject(new Error("closed")) }),
     );
     expect(diagnostic).toEqual({ location: "stdin", severity: "error", code: "internal", message: "closed" });
+  });
+});
+
+describe("scrubbing at the library boundary", () => {
+  it("refuses a webhook URL as an input and redacts its token in the diagnostic", async () => {
+    const calls: number[] = [];
+    const impl = (async () => {
+      calls.push(1);
+      throw new Error("must not be called");
+    }) as unknown as FetchLike;
+    const [diagnostic] = await diagnosticsOfRejection(
+      resolveInputs(["https://discord.com/api/webhooks/1/secret-token"], { fetchImpl: impl }),
+    );
+    expect(calls).toEqual([]);
+    expect(diagnostic).toMatchObject({
+      location: "https://discord.com/api/webhooks/1/<token>",
+      code: "download-failed",
+    });
+    expect(JSON.stringify(diagnostic)).not.toContain("secret-token");
+  });
+
+  it("hides the destination in diagnostics and notes for inputs that name it", async () => {
+    const { impl } = fetchSequence(
+      new Error("socket hang up"),
+      new Response("gone", { status: 404, statusText: "Not Found" }),
+    );
+    const { sleep } = sleepRecorder();
+    const notes: Diagnostic[] = [];
+    const diagnostics = await diagnosticsOfRejection(
+      resolveInputs(["https://cdn.discordapp.com/attachments/1/2/report.md"], {
+        fetchImpl: impl,
+        sleep,
+        hideDestination: true,
+        onDiagnostic: (diagnostic) => {
+          notes.push(diagnostic);
+        },
+      }),
+    );
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]?.location).toBe("<destination>");
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toMatchObject({ location: "<destination>", code: "retry" });
+    for (const entry of [...diagnostics, ...notes]) {
+      expect(JSON.stringify(entry)).not.toMatch(FORBIDDEN);
+    }
+  });
+
+  it.skipIf(process.getuid?.() === 0)("classifies a file whose contents cannot be read as unreadable", async () => {
+    const dir = await scratchDir();
+    const path = join(dir, "locked.txt");
+    await writeFile(path, "secret");
+    await chmod(path, 0o000);
+    const [diagnostic] = await diagnosticsOfRejection(resolveInputs([path]));
+    expect(diagnostic).toEqual({
+      location: path,
+      severity: "error",
+      code: "unreadable",
+      message: "cannot read (EACCES)",
+      help: `check permissions: ls -la ${path}`,
+    });
   });
 });

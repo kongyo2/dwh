@@ -55,8 +55,18 @@ describe("neutralize", () => {
     );
   });
 
-  it("leaves unrelated text alone", () => {
+  it("replaces any other URL on the service's hosts whole", () => {
+    expect(neutralize("from https://cdn.discordapp.com/attachments/1/2/a.png?ex=1&is=2 ok")).toBe(
+      "from <destination> ok",
+    );
+    expect(neutralize("see https://discord.com/channels/1/2/3 now")).toBe("see <destination> now");
+    expect(neutralize("https://discord.com")).toBe("<destination>");
+  });
+
+  it("leaves unrelated text alone, but replaces the bare words wherever they appear", () => {
     expect(neutralize("report.md: no such file")).toBe("report.md: no such file");
+    expect(neutralize("https://example.com/guide.html")).toBe("https://example.com/guide.html");
+    expect(neutralize("discord-export.zip")).toBe("the destination-export.zip");
   });
 });
 

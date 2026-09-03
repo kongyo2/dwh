@@ -1,5 +1,5 @@
 import { FormData } from "undici";
-import { adviceDiagnostic, DiagnosticError, errorDiagnostic, type Diagnostic } from "./diagnostics.js";
+import { adviceDiagnostic, DiagnosticError, errorDiagnostic, scrubDiagnostic, type Diagnostic } from "./diagnostics.js";
 import {
   defaultSleep,
   describeFetchError,
@@ -74,12 +74,28 @@ export function resolveWebhookConfig(env: Readonly<Record<string, string | undef
   throw new DiagnosticError([errorDiagnostic(TOOL_LOCATION, "not-configured", message, help)]);
 }
 
+/** Whether a string is a webhook URL of the service (any of its hosts, any API version). */
+export function isWebhookUrl(spec: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(spec);
+  } catch {
+    return false;
+  }
+  return WEBHOOK_HOSTS.has(url.hostname) && WEBHOOK_PATH_PATTERN.test(url.pathname);
+}
+
 /** The validated webhook URL from the environment; see resolveWebhookConfig for the details. */
 export function resolveWebhookUrl(env: Readonly<Record<string, string | undefined>>): string {
   return resolveWebhookConfig(env).url;
 }
 
-function validateWebhookUrl(raw: string, source: WebhookEnvVar, wording: Wording): URL {
+/** A URL handed straight to the library gets the same validation as one from the environment. */
+function validateDirectUrl(webhookUrl: string, wording: Wording): URL {
+  return validateWebhookUrl(webhookUrl, "the webhook URL", wording);
+}
+
+function validateWebhookUrl(raw: string, source: string, wording: Wording): URL {
   let url: URL;
   try {
     url = new URL(raw);
@@ -162,39 +178,43 @@ export async function sendFiles(
   files: readonly OutgoingFile[],
   options: SendOptions = {},
 ): Promise<SendResult> {
+  const policy = policyFrom(options);
+  const url = urlWithWait(validateDirectUrl(webhookUrl, policy.wording).href);
   if (files.length === 0) {
     return { deliveries: [], messages: 0 };
   }
-  const policy = policyFrom(options);
-  const url = urlWithWait(webhookUrl);
   const batches = planBatches(files);
   const deliveries: Delivery[] = [];
-  for (const [index, batch] of batches.entries()) {
-    const { meta, message } = await postBatch(policy, url, batch);
-    for (const [position, file] of batch.entries()) {
-      const attachment = message.attachments[position];
-      const delivery: Delivery = {
-        file,
-        message: index + 1,
-        messageId: message.id,
-        channelId: message.channelId,
-        attachmentId: attachment?.id,
-        url: attachment?.url,
-      };
-      deliveries.push(delivery);
-      options.onSent?.(file, delivery);
+  try {
+    for (const [index, batch] of batches.entries()) {
+      const { meta, message } = await postBatch(policy, url, batch);
+      for (const [position, file] of batch.entries()) {
+        const attachment = message.attachments[position];
+        const delivery: Delivery = {
+          file,
+          message: index + 1,
+          messageId: message.id,
+          channelId: message.channelId,
+          attachmentId: attachment?.id,
+          url: attachment?.url,
+        };
+        deliveries.push(delivery);
+        options.onSent?.(file, delivery);
+      }
+      const isLastBatch = index === batches.length - 1;
+      if (!isLastBatch && meta.remaining === 0 && meta.resetAfterMs > 0) {
+        policy.emit(
+          adviceDiagnostic(
+            TOOL_LOCATION,
+            "rate-limit",
+            `rate limit budget spent; pausing ${formatSeconds(meta.resetAfterMs)} before the next message (not an error)`,
+          ),
+        );
+        await policy.sleep(meta.resetAfterMs);
+      }
     }
-    const isLastBatch = index === batches.length - 1;
-    if (!isLastBatch && meta.remaining === 0 && meta.resetAfterMs > 0) {
-      policy.emit(
-        adviceDiagnostic(
-          TOOL_LOCATION,
-          "rate-limit",
-          `rate limit budget spent; pausing ${formatSeconds(meta.resetAfterMs)} before the next message (not an error)`,
-        ),
-      );
-      await policy.sleep(meta.resetAfterMs);
-    }
+  } catch (error) {
+    throw scrubbedError(error, policy.wording);
   }
   return { deliveries, messages: batches.length };
 }
@@ -221,14 +241,20 @@ export interface CheckOptions {
  */
 export async function checkWebhook(webhookUrl: string, options: CheckOptions = {}): Promise<WebhookInfo> {
   const policy = policyFrom(options);
-  const url = new URL(webhookUrl);
+  const url = validateDirectUrl(webhookUrl, policy.wording);
   url.search = "";
-  const response = await requestWithPolicy(policy, () =>
-    policy.fetchImpl(url.href, { method: "GET", signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) }),
-  );
-  const bodyText = await response.text().catch(() => "");
-  if (!response.ok) {
-    throw new DiagnosticError([apiErrorDiagnostic(response.status, bodyText, policy.wording)]);
+  let response: UndiciResponse;
+  let bodyText: string;
+  try {
+    response = await requestWithPolicy(policy, () =>
+      policy.fetchImpl(url.href, { method: "GET", signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) }),
+    );
+    bodyText = await response.text().catch(() => "");
+    if (!response.ok) {
+      throw new DiagnosticError([apiErrorDiagnostic(response.status, bodyText, policy.wording)]);
+    }
+  } catch (error) {
+    throw scrubbedError(error, policy.wording);
   }
   const parsed = parseJson(bodyText);
   const record = isRecord(parsed) ? parsed : {};
@@ -249,12 +275,26 @@ interface RequestPolicy {
 }
 
 function policyFrom(options: SendOptions | CheckOptions): RequestPolicy {
+  const wording = wordingFor(options.hideDestination);
+  const onDiagnostic = options.onDiagnostic;
   return {
     fetchImpl: options.fetchImpl ?? proxyAwareFetch,
     sleep: options.sleep ?? defaultSleep,
-    emit: options.onDiagnostic ?? (() => undefined),
-    wording: wordingFor(options.hideDestination),
+    // Every note reaches the caller scrubbed, like every thrown diagnostic.
+    emit:
+      onDiagnostic === undefined
+        ? () => undefined
+        : (diagnostic) => onDiagnostic(scrubDiagnostic(diagnostic, wording.scrub)),
+    wording,
   };
+}
+
+/** Rethrow with every diagnostic scrubbed, so library callers never see a raw token or, when hidden, the service. */
+function scrubbedError(error: unknown, wording: Wording): unknown {
+  if (error instanceof DiagnosticError) {
+    return new DiagnosticError(error.diagnostics.map((diagnostic) => scrubDiagnostic(diagnostic, wording.scrub)));
+  }
+  return error;
 }
 
 /**
