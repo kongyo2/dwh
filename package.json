@@ -1,6 +1,6 @@
 {
   "name": "@kongyo2/dwh",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Deliver files from a coding agent to a human over a Discord webhook. Files only — no messages, and rate limits are waited out, never surfaced.",
   "keywords": [
     "cli",
