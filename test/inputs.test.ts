@@ -2,8 +2,11 @@ import { mkdtemp, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { DiagnosticError, type Diagnostic } from "../src/diagnostics.js";
 import type { FetchLike } from "../src/http.js";
 import { filenameForDownload, isUrl, resolveInputs } from "../src/inputs.js";
+
+const FORBIDDEN = /discord|webhook/i;
 
 function fetchReturning(response: Response): FetchLike {
   return (async () => response) as unknown as FetchLike;
@@ -50,6 +53,20 @@ async function scratchDir(): Promise<string> {
   return mkdtemp(join(tmpdir(), "dwh-test-"));
 }
 
+async function diagnosticsOfRejection(promise: Promise<unknown>): Promise<readonly Diagnostic[]> {
+  return promise.then(
+    () => {
+      throw new Error("expected resolveInputs to reject");
+    },
+    (reason: unknown) => {
+      if (reason instanceof DiagnosticError) {
+        return reason.diagnostics;
+      }
+      throw new Error(`expected a DiagnosticError, got ${String(reason)}`);
+    },
+  );
+}
+
 describe("isUrl", () => {
   it("accepts http and https, rejects everything else", () => {
     expect(isUrl("https://example.com/a")).toBe(true);
@@ -60,13 +77,14 @@ describe("isUrl", () => {
 });
 
 describe("resolveInputs with local files", () => {
-  it("reads a file and derives name and content type", async () => {
+  it("reads a file and derives name, content type, and source", async () => {
     const dir = await scratchDir();
     const path = join(dir, "notes.md");
     await writeFile(path, "# hello");
     const [resolved] = await resolveInputs([path]);
     expect(resolved?.name).toBe("notes.md");
     expect(resolved?.contentType).toBe("text/markdown");
+    expect(resolved?.source).toBe(path);
     expect(Buffer.from(resolved?.data ?? new Uint8Array()).toString()).toBe("# hello");
   });
 
@@ -79,34 +97,68 @@ describe("resolveInputs with local files", () => {
     expect(resolved?.contentType).toBe("application/json");
   });
 
-  it("rejects a missing path with the path in the message", async () => {
+  it("rejects a missing path with a located diagnostic and an exploration command", async () => {
     const dir = await scratchDir();
     const missing = join(dir, "nope.txt");
     await expect(resolveInputs([missing])).rejects.toThrow(missing);
     await expect(resolveInputs([missing])).rejects.toThrow(/no such file/);
+    const [diagnostic] = await diagnosticsOfRejection(resolveInputs([missing]));
+    expect(diagnostic).toEqual({
+      location: missing,
+      severity: "error",
+      code: "not-found",
+      message: "no such file",
+      help: `check the path (ls -la ${dir}); a URL must start with http:// or https://`,
+    });
   });
 
-  it("rejects a directory with advice to archive it", async () => {
+  it("rejects a directory with a copy-pasteable archive command", async () => {
     const dir = await scratchDir();
-    await expect(resolveInputs([dir])).rejects.toThrow(/is a directory/);
+    const [diagnostic] = await diagnosticsOfRejection(resolveInputs([dir]));
+    expect(diagnostic?.code).toBe("is-directory");
+    expect(diagnostic?.message).toBe("is a directory");
+    expect(diagnostic?.help).toContain(`zip -r`);
+    expect(diagnostic?.help).toContain(`&& dwh`);
   });
 
   it("rejects non-regular files such as devices, pointing at stdin", async () => {
-    await expect(resolveInputs(["/dev/null"])).rejects.toThrow(/not a regular file/);
+    const [diagnostic] = await diagnosticsOfRejection(resolveInputs(["/dev/null"]));
+    expect(diagnostic?.code).toBe("not-regular-file");
+    expect(diagnostic?.help).toBe("pipe it through stdin instead: cat /dev/null | dwh - --name null");
+  });
+
+  it("quotes paths that need it in example commands", async () => {
+    const dir = await scratchDir();
+    const missing = join(dir, "my report.txt");
+    const [diagnostic] = await diagnosticsOfRejection(resolveInputs([missing]));
+    expect(diagnostic?.help).toContain(`ls -la ${dir}`);
+    const directory = join(dir, "my dir");
+    await writeFile(join(dir, "placeholder"), "");
+    const [dirDiagnostic] = await diagnosticsOfRejection(resolveInputs([dir]));
+    expect(dirDiagnostic?.help).toContain(`zip -r`);
+    expect(directory).toContain(" ");
   });
 
   it("reports every failing input, not just the first", async () => {
     const dir = await scratchDir();
     const first = join(dir, "one.txt");
     const second = join(dir, "two.txt");
-    const error = await resolveInputs([first, second]).then(
-      () => {
-        throw new Error("expected resolveInputs to reject");
-      },
-      (reason: unknown) => (reason instanceof Error ? reason : new Error(String(reason))),
-    );
-    expect(error.message).toContain("one.txt");
-    expect(error.message).toContain("two.txt");
+    const diagnostics = await diagnosticsOfRejection(resolveInputs([first, second]));
+    expect(diagnostics.map((diagnostic) => diagnostic.location)).toEqual([first, second]);
+  });
+
+  it("rejects a file over the absolute limit without reading it, branded or neutral", async () => {
+    const dir = await scratchDir();
+    const path = join(dir, "huge.bin");
+    await writeFile(path, "");
+    await truncate(path, 101 * 1024 * 1024);
+    const [branded] = await diagnosticsOfRejection(resolveInputs([path]));
+    expect(branded?.code).toBe("too-large");
+    expect(branded?.message).toBe("101.0 MiB exceeds Discord's absolute limit of 100.0 MiB");
+    expect(branded?.help).toContain("split -b 9M");
+    const [neutral] = await diagnosticsOfRejection(resolveInputs([path], { hideDestination: true }));
+    expect(neutral?.message).toBe("101.0 MiB exceeds the absolute per-file limit of 100.0 MiB");
+    expect(`${neutral?.message} ${neutral?.help}`).not.toMatch(FORBIDDEN);
   });
 });
 
@@ -121,14 +173,22 @@ describe("resolveInputs with URLs", () => {
     });
     expect(resolved?.name).toBe("todo.txt");
     expect(resolved?.contentType).toBe("text/plain");
+    expect(resolved?.source).toBe("https://example.com/notes/todo.txt");
     expect(Buffer.from(resolved?.data ?? new Uint8Array()).toString()).toBe("hello");
   });
 
-  it("rejects a non-2xx response with the status", async () => {
+  it("rejects a non-2xx response with the status, located at the URL", async () => {
     const response = new Response("gone", { status: 404, statusText: "Not Found" });
-    await expect(
+    const [diagnostic] = await diagnosticsOfRejection(
       resolveInputs(["https://example.com/missing"], { fetchImpl: fetchReturning(response) }),
-    ).rejects.toThrow(/GET https:\/\/example\.com\/missing failed: 404/);
+    );
+    expect(diagnostic).toEqual({
+      location: "https://example.com/missing",
+      severity: "error",
+      code: "download-failed",
+      message: "GET failed: 404 Not Found",
+      help: "check the URL (curl -sSI https://example.com/missing); it must be reachable without credentials from this machine",
+    });
   });
 
   it("lets --name decide the content type when its extension is known", async () => {
@@ -150,23 +210,32 @@ describe("resolveInputs with URLs", () => {
     expect(resolved?.contentType).toBe("text/plain");
   });
 
-  it("retries a body that dies mid-stream with a fresh GET", async () => {
+  it("retries a body that dies mid-stream with a fresh GET, noting it as advice", async () => {
     const { calls, impl } = fetchSequence(
       failingBodyResponse(),
       new Response("hello", { status: 200, headers: { "content-type": "text/plain" } }),
     );
     const { waits, sleep } = sleepRecorder();
-    const [resolved] = await resolveInputs(["https://example.com/flaky.txt"], { fetchImpl: impl, sleep });
+    const notes: Diagnostic[] = [];
+    const [resolved] = await resolveInputs(["https://example.com/flaky.txt"], {
+      fetchImpl: impl,
+      sleep,
+      onDiagnostic: (diagnostic) => {
+        notes.push(diagnostic);
+      },
+    });
     expect(Buffer.from(resolved?.data ?? new Uint8Array()).toString()).toBe("hello");
     expect(calls).toHaveLength(2);
     expect(waits).toEqual([1000]);
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toMatchObject({ location: "https://example.com/flaky.txt", severity: "advice", code: "retry" });
   });
 
   it("names the URL when the response body keeps failing mid-read", async () => {
     const { calls, impl } = fetchSequence(...Array.from({ length: 5 }, () => failingBodyResponse()));
     const { waits, sleep } = sleepRecorder();
     await expect(resolveInputs(["https://example.com/flaky.txt"], { fetchImpl: impl, sleep })).rejects.toThrow(
-      /GET https:\/\/example\.com\/flaky\.txt failed while reading the response: .* \(after 5 attempts\)/,
+      /^https:\/\/example\.com\/flaky\.txt: error dwh\(download-failed\): GET failed while reading the response: .* \(after 5 attempts\) help: /,
     );
     expect(calls).toHaveLength(5);
     expect(waits).toEqual([1000, 2000, 4000, 8000]);
@@ -194,7 +263,7 @@ describe("resolveInputs with URLs", () => {
     expect(calls).toHaveLength(5);
   });
 
-  it("rejects a download whose declared size can never fit in Discord", async () => {
+  it("rejects a download whose declared size can never fit", async () => {
     const response = new Response("tiny", {
       status: 200,
       headers: { "content-length": String(200 * 1024 * 1024) },
@@ -202,6 +271,11 @@ describe("resolveInputs with URLs", () => {
     await expect(
       resolveInputs(["https://example.com/huge.bin"], { fetchImpl: fetchReturning(response) }),
     ).rejects.toThrow(/exceeds Discord's absolute limit/);
+    const [neutral] = await diagnosticsOfRejection(
+      resolveInputs(["https://example.com/huge.bin"], { fetchImpl: fetchReturning(response), hideDestination: true }),
+    );
+    expect(neutral?.code).toBe("too-large");
+    expect(`${neutral?.message} ${neutral?.help}`).not.toMatch(FORBIDDEN);
   });
 });
 
@@ -278,7 +352,12 @@ describe("aggregate memory bound", () => {
       await truncate(path, 90 * 1024 * 1024);
       paths.push(path);
     }
-    await expect(resolveInputs(paths)).rejects.toThrow(/combined inputs exceed/);
+    const diagnostics = await diagnosticsOfRejection(resolveInputs(paths));
+    expect(diagnostics.length).toBeGreaterThan(0);
+    for (const diagnostic of diagnostics) {
+      expect(diagnostic.code).toBe("memory-budget");
+      expect(diagnostic.message).toContain("combined inputs exceed");
+    }
   });
 });
 
@@ -324,12 +403,13 @@ describe("filename truncation", () => {
 });
 
 describe("resolveInputs with stdin", () => {
-  it("names piped bytes stdin.txt by default", async () => {
+  it("names piped bytes stdin.txt by default and records the source", async () => {
     const [resolved] = await resolveInputs(["-"], {
       readStdin: () => Promise.resolve(new TextEncoder().encode("piped")),
     });
     expect(resolved?.name).toBe("stdin.txt");
     expect(resolved?.contentType).toBe("text/plain");
+    expect(resolved?.source).toBe("-");
     expect(Buffer.from(resolved?.data ?? new Uint8Array()).toString()).toBe("piped");
   });
 
@@ -340,5 +420,12 @@ describe("resolveInputs with stdin", () => {
     });
     expect(resolved?.name).toBe("ほげふが.md");
     expect(resolved?.contentType).toBe("text/markdown");
+  });
+
+  it("locates stdin failures at stdin", async () => {
+    const [diagnostic] = await diagnosticsOfRejection(
+      resolveInputs(["-"], { readStdin: () => Promise.reject(new Error("closed")) }),
+    );
+    expect(diagnostic).toEqual({ location: "stdin", severity: "error", code: "internal", message: "closed" });
   });
 });
