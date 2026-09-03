@@ -1,4 +1,5 @@
 import { FormData } from "undici";
+import { adviceDiagnostic, DiagnosticError, errorDiagnostic, scrubDiagnostic, type Diagnostic } from "./diagnostics.js";
 import {
   defaultSleep,
   describeFetchError,
@@ -9,16 +10,22 @@ import {
   type FetchLike,
 } from "./http.js";
 import type { OutgoingFile } from "./inputs.js";
+import { formatBytes } from "./text.js";
+import { wordingFor, wordingFromEnv, type Wording } from "./wording.js";
+
+export { redactWebhookTokens } from "./wording.js";
 
 export const WEBHOOK_ENV_VARS: readonly ["DWH_WEBHOOK_URL", "DISCORD_WEBHOOK_URL"] = [
   "DWH_WEBHOOK_URL",
   "DISCORD_WEBHOOK_URL",
 ];
 
-/** Discord accepts at most this many attachments per message. */
+export type WebhookEnvVar = (typeof WEBHOOK_ENV_VARS)[number];
+
+/** The destination accepts at most this many attachments per message. */
 export const MAX_FILES_PER_MESSAGE: number = 10;
 
-/** Keep each multipart request under Discord's total request size with headroom for encoding overhead. */
+/** Keep each multipart request under the total request size with headroom for encoding overhead. */
 export const MAX_BATCH_BYTES: number = 24 * 1024 * 1024;
 
 const WEBHOOK_HOSTS = new Set(["discord.com", "ptb.discord.com", "canary.discord.com", "discordapp.com"]);
@@ -28,56 +35,100 @@ const REQUEST_TIMEOUT_MS = 120_000;
 const MIN_RATE_LIMIT_WAIT_MS = 1_000;
 const MAX_RATE_LIMIT_WAIT_MS = 60_000;
 const RATE_LIMIT_CUSHION_MS = 250;
+const TOOL_LOCATION = "dwh";
 
-export interface SendOptions {
-  fetchImpl?: FetchLike | undefined;
-  sleep?: ((ms: number) => Promise<void>) | undefined;
-  /** Progress notes worth relaying (rate-limit waits, retries). Never an error. */
-  onNote?: ((note: string) => void) | undefined;
-  /** Called once per file after the message carrying it is accepted by Discord. */
-  onSent?: ((file: OutgoingFile) => void) | undefined;
+// Error codes the destination returns in JSON bodies (see the webhook and error-code references).
+const CODE_UNKNOWN_CHANNEL = 10003;
+const CODE_UNKNOWN_WEBHOOK = 10015;
+const CODE_REQUEST_ENTITY_TOO_LARGE = 40005;
+const CODE_INVALID_WEBHOOK_TOKEN = 50027;
+const CODE_INVALID_FORM_BODY = 50035;
+
+type UndiciResponse = Awaited<ReturnType<FetchLike>>;
+
+export interface WebhookConfig {
+  /** The validated URL, query string included (a ?thread_id=<id> is preserved). */
+  readonly url: string;
+  /** Which environment variable supplied it. */
+  readonly source: WebhookEnvVar;
+  /** The thread the URL targets, when it carries ?thread_id=<id>. */
+  readonly threadId: string | undefined;
 }
 
 /**
  * Read the webhook URL from the environment (DWH_WEBHOOK_URL, then DISCORD_WEBHOOK_URL)
- * and reject anything that is not a Discord webhook URL, so a misconfiguration fails
- * here with a clear message instead of as a confusing HTTP error later.
+ * and reject anything that is not a webhook URL, so a misconfiguration fails here with a
+ * clear diagnostic instead of as a confusing HTTP error later. DWH_HIDE_DESTINATION in the
+ * same environment decides how that diagnostic is worded.
  */
-export function resolveWebhookUrl(env: Readonly<Record<string, string | undefined>>): string {
+export function resolveWebhookConfig(env: Readonly<Record<string, string | undefined>>): WebhookConfig {
+  const wording = wordingFromEnv(env);
   for (const key of WEBHOOK_ENV_VARS) {
     const value = env[key]?.trim();
     if (value !== undefined && value !== "") {
-      return validateWebhookUrl(value, key);
+      const url = validateWebhookUrl(value, key, wording);
+      return { url: url.href, source: key, threadId: url.searchParams.get("thread_id") ?? undefined };
     }
   }
-  throw new Error(
-    [
-      "no webhook configured — set DWH_WEBHOOK_URL to your Discord webhook URL",
-      "create one in Discord: channel settings → Integrations → Webhooks → New Webhook",
-      'then: export DWH_WEBHOOK_URL="https://discord.com/api/webhooks/<id>/<token>"',
-    ].join("\n"),
-  );
+  const { message, help } = wording.notConfigured;
+  throw new DiagnosticError([errorDiagnostic(TOOL_LOCATION, "not-configured", message, help)]);
 }
 
-function validateWebhookUrl(raw: string, source: string): string {
+/**
+ * Whether a string is a webhook URL of the service (any of its hosts, any API version). The
+ * path is also checked percent-decoded, so /api/%77ebhooks/1/%74oken counts: the server would
+ * decode it the same way, and this is the guard against downloading the webhook itself.
+ */
+export function isWebhookUrl(spec: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(spec);
+  } catch {
+    return false;
+  }
+  if (!WEBHOOK_HOSTS.has(url.hostname)) {
+    return false;
+  }
+  if (WEBHOOK_PATH_PATTERN.test(url.pathname)) {
+    return true;
+  }
+  try {
+    return WEBHOOK_PATH_PATTERN.test(decodeURIComponent(url.pathname));
+  } catch {
+    // A malformed escape cannot spell a webhook path.
+    return false;
+  }
+}
+
+/** The validated webhook URL from the environment; see resolveWebhookConfig for the details. */
+export function resolveWebhookUrl(env: Readonly<Record<string, string | undefined>>): string {
+  return resolveWebhookConfig(env).url;
+}
+
+/** A URL handed straight to the library gets the same validation as one from the environment. */
+function validateDirectUrl(webhookUrl: string, wording: Wording): URL {
+  return validateWebhookUrl(webhookUrl, "the webhook URL", wording);
+}
+
+function validateWebhookUrl(raw: string, source: string, wording: Wording): URL {
   let url: URL;
   try {
     url = new URL(raw);
   } catch {
-    throw new Error(`${source} is not a valid URL — expected https://discord.com/api/webhooks/<id>/<token>`);
+    const { message, help } = wording.invalidConfig(source, "not-a-url");
+    throw new DiagnosticError([errorDiagnostic(TOOL_LOCATION, "invalid-config", message, help)]);
   }
   if (url.protocol !== "https:" || !WEBHOOK_HOSTS.has(url.hostname) || !WEBHOOK_PATH_PATTERN.test(url.pathname)) {
-    throw new Error(
-      `${source} does not look like a Discord webhook URL — expected https://discord.com/api/webhooks/<id>/<token>`,
-    );
+    const { message, help } = wording.invalidConfig(source, "not-a-webhook");
+    throw new DiagnosticError([errorDiagnostic(TOOL_LOCATION, "invalid-config", message, help)]);
   }
-  return url.href;
+  return url;
 }
 
 /**
  * Split files into messages: at most MAX_FILES_PER_MESSAGE files and MAX_BATCH_BYTES
  * bytes per message, preserving input order. A single file larger than the byte
- * budget gets a message of its own (Discord judges whether it fits the server's limit).
+ * budget gets a message of its own (the destination judges whether it fits the server's limit).
  */
 export function planBatches(files: readonly OutgoingFile[]): OutgoingFile[][] {
   const batches: OutgoingFile[][] = [];
@@ -99,85 +150,221 @@ export function planBatches(files: readonly OutgoingFile[]): OutgoingFile[][] {
   return batches;
 }
 
+/** Where one file ended up, as reported by the destination for the message that carried it. */
+export interface Delivery {
+  readonly file: OutgoingFile;
+  /** 1-based index of the message that carried the file. */
+  readonly message: number;
+  readonly messageId: string | undefined;
+  readonly channelId: string | undefined;
+  readonly attachmentId: string | undefined;
+  /** Direct URL of the attachment as reported by the destination; such links expire. */
+  readonly url: string | undefined;
+}
+
+export interface SendResult {
+  /** One entry per file, in input order. */
+  readonly deliveries: readonly Delivery[];
+  /** How many messages it took. */
+  readonly messages: number;
+}
+
+export interface SendOptions {
+  fetchImpl?: FetchLike | undefined;
+  sleep?: ((ms: number) => Promise<void>) | undefined;
+  /** Progress notes worth relaying (rate-limit waits, retries). Always severity "advice", never an error. */
+  onDiagnostic?: ((diagnostic: Diagnostic) => void) | undefined;
+  /** Called once per file after the message carrying it is accepted by the destination. */
+  onSent?: ((file: OutgoingFile, delivery: Delivery) => void) | undefined;
+  /** Word every message so that it never names the service files are delivered to. */
+  hideDestination?: boolean | undefined;
+}
+
 /**
- * Send files to the webhook, one Discord message per batch.
+ * Send files to the webhook, one message per batch.
  *
- * Rate limiting is absorbed, never surfaced: a 429 waits out Discord's retry_after and
+ * Rate limiting is absorbed, never surfaced: a 429 waits out the requested retry_after and
  * sends again, and an exhausted rate-limit budget pauses before the next message.
  * Network errors and 5xx responses retry with backoff a bounded number of times; only
- * those and real 4xx rejections throw.
+ * those and real 4xx rejections throw (as a DiagnosticError).
  */
 export async function sendFiles(
   webhookUrl: string,
   files: readonly OutgoingFile[],
   options: SendOptions = {},
-): Promise<void> {
+): Promise<SendResult> {
+  const policy = policyFrom(options);
+  const url = urlWithWait(validateDirectUrl(webhookUrl, policy.wording).href);
   if (files.length === 0) {
-    return;
+    return { deliveries: [], messages: 0 };
   }
-  const fetchImpl = options.fetchImpl ?? proxyAwareFetch;
-  const sleep = options.sleep ?? defaultSleep;
-  const note = options.onNote ?? (() => undefined);
-  const url = urlWithWait(webhookUrl);
   const batches = planBatches(files);
-  for (const [index, batch] of batches.entries()) {
-    const meta = await postBatch(url, batch, fetchImpl, sleep, note);
-    for (const file of batch) {
-      options.onSent?.(file);
+  const deliveries: Delivery[] = [];
+  try {
+    for (const [index, batch] of batches.entries()) {
+      const { meta, message } = await postBatch(policy, url, batch);
+      for (const [position, file] of batch.entries()) {
+        const attachment = message.attachments[position];
+        const delivery: Delivery = {
+          file,
+          message: index + 1,
+          messageId: message.id,
+          channelId: message.channelId,
+          attachmentId: attachment?.id,
+          url: attachment?.url,
+        };
+        deliveries.push(delivery);
+        options.onSent?.(file, delivery);
+      }
+      const isLastBatch = index === batches.length - 1;
+      if (!isLastBatch && meta.remaining === 0 && meta.resetAfterMs > 0) {
+        policy.emit(
+          adviceDiagnostic(
+            TOOL_LOCATION,
+            "rate-limit",
+            `rate limit budget spent; pausing ${formatSeconds(meta.resetAfterMs)} before the next message (not an error)`,
+          ),
+        );
+        await policy.sleep(meta.resetAfterMs);
+      }
     }
-    const isLastBatch = index === batches.length - 1;
-    if (!isLastBatch && meta.remaining === 0 && meta.resetAfterMs > 0) {
-      note(`rate limit budget spent — pausing ${formatSeconds(meta.resetAfterMs)} before the next message`);
-      await sleep(meta.resetAfterMs);
-    }
+  } catch (error) {
+    throw scrubbedError(error, policy.wording);
   }
+  return { deliveries, messages: batches.length };
 }
 
-/** Replace webhook tokens in any text that might be logged or thrown. */
-export function redactWebhookTokens(text: string): string {
-  return text.replace(/(\/api\/(?:v\d+\/)?webhooks\/\d+\/)[\w-]+/g, "$1<token>");
+/** What the destination reports about the webhook itself. */
+export interface WebhookInfo {
+  readonly id: string | undefined;
+  readonly name: string | undefined;
+  readonly type: number | undefined;
+  readonly channelId: string | undefined;
+  readonly guildId: string | undefined;
 }
 
-interface BatchMeta {
-  remaining: number | undefined;
-  resetAfterMs: number;
+export interface CheckOptions {
+  fetchImpl?: FetchLike | undefined;
+  sleep?: ((ms: number) => Promise<void>) | undefined;
+  onDiagnostic?: ((diagnostic: Diagnostic) => void) | undefined;
+  hideDestination?: boolean | undefined;
 }
 
-async function postBatch(
-  url: string,
-  batch: readonly OutgoingFile[],
-  fetchImpl: FetchLike,
-  sleep: (ms: number) => Promise<void>,
-  note: (text: string) => void,
-): Promise<BatchMeta> {
+/**
+ * Verify that the webhook exists and accepts its token with one GET request; nothing is
+ * posted. Rate limits and transient failures are handled exactly as for delivery.
+ */
+export async function checkWebhook(webhookUrl: string, options: CheckOptions = {}): Promise<WebhookInfo> {
+  const policy = policyFrom(options);
+  const url = validateDirectUrl(webhookUrl, policy.wording);
+  url.search = "";
+  let response: UndiciResponse;
+  let bodyText: string;
+  try {
+    response = await requestWithPolicy(policy, () =>
+      policy.fetchImpl(url.href, { method: "GET", signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) }),
+    );
+    bodyText = await response.text().catch(() => "");
+    if (!response.ok) {
+      throw new DiagnosticError([apiErrorDiagnostic(response.status, bodyText, policy.wording)]);
+    }
+  } catch (error) {
+    throw scrubbedError(error, policy.wording);
+  }
+  const parsed = parseJson(bodyText);
+  const record = isRecord(parsed) ? parsed : {};
+  return {
+    id: stringField(record, "id"),
+    name: stringField(record, "name"),
+    type: numberField(record, "type"),
+    channelId: stringField(record, "channel_id"),
+    guildId: stringField(record, "guild_id"),
+  };
+}
+
+interface RequestPolicy {
+  readonly fetchImpl: FetchLike;
+  readonly sleep: (ms: number) => Promise<void>;
+  readonly emit: (diagnostic: Diagnostic) => void;
+  readonly wording: Wording;
+}
+
+function policyFrom(options: SendOptions | CheckOptions): RequestPolicy {
+  const wording = wordingFor(options.hideDestination);
+  const onDiagnostic = options.onDiagnostic;
+  return {
+    fetchImpl: options.fetchImpl ?? proxyAwareFetch,
+    sleep: options.sleep ?? defaultSleep,
+    // Every note reaches the caller scrubbed, like every thrown diagnostic.
+    emit:
+      onDiagnostic === undefined
+        ? () => undefined
+        : (diagnostic) => onDiagnostic(scrubDiagnostic(diagnostic, wording.scrub)),
+    wording,
+  };
+}
+
+/** Rethrow with every diagnostic scrubbed, so library callers never see a raw token or, when hidden, the service. */
+function scrubbedError(error: unknown, wording: Wording): unknown {
+  if (error instanceof DiagnosticError) {
+    return new DiagnosticError(error.diagnostics.map((diagnostic) => scrubDiagnostic(diagnostic, wording.scrub)));
+  }
+  return error;
+}
+
+/**
+ * Run one request under the shared policy: network errors and 5xx responses retry with
+ * backoff up to MAX_TRANSIENT_ATTEMPTS, a 429 waits out retry_after however often it
+ * happens, and any other response is returned to the caller unread.
+ */
+async function requestWithPolicy(
+  policy: RequestPolicy,
+  makeRequest: () => Promise<UndiciResponse>,
+): Promise<UndiciResponse> {
+  const { wording } = policy;
   let transientFailures = 0;
   for (;;) {
-    let response: Awaited<ReturnType<FetchLike>>;
+    let response: UndiciResponse;
     try {
-      response = await fetchImpl(url, {
-        method: "POST",
-        body: buildForm(batch),
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-      });
+      response = await makeRequest();
     } catch (error) {
       transientFailures += 1;
-      const description = redactWebhookTokens(describeFetchError(error));
+      const description = wording.scrub(describeFetchError(error));
       if (transientFailures >= MAX_TRANSIENT_ATTEMPTS) {
         // The caught error is deliberately NOT attached as `cause`: undici error messages can
         // contain the full request URL, and consumers log thrown errors whole, which would
-        // leak the webhook token past the redaction below.
+        // leak the webhook token past the scrubbing above.
         // oxlint-disable-next-line preserve-caught-error
-        throw new Error(`could not reach Discord after ${MAX_TRANSIENT_ATTEMPTS} attempts: ${description}`);
+        throw new DiagnosticError([
+          errorDiagnostic(
+            TOOL_LOCATION,
+            "unreachable",
+            `could not reach ${wording.service} after ${MAX_TRANSIENT_ATTEMPTS} attempts: ${description}`,
+            "check network access from this machine (and HTTPS_PROXY if it needs a proxy), then run the same command again",
+          ),
+        ]);
       }
       const delayMs = transientDelayMs(transientFailures);
-      note(`network error (${description}) — retrying in ${formatSeconds(delayMs)}`);
-      await sleep(delayMs);
+      policy.emit(
+        adviceDiagnostic(
+          TOOL_LOCATION,
+          "retry",
+          `network error (${description}); retrying in ${formatSeconds(delayMs)}`,
+        ),
+      );
+      await policy.sleep(delayMs);
       continue;
     }
     if (response.status === 429) {
       const waitMs = await rateLimitWaitMs(response);
-      note(`rate limited by Discord — waiting ${formatSeconds(waitMs)}, then sending (not an error)`);
-      await sleep(waitMs);
+      policy.emit(
+        adviceDiagnostic(
+          TOOL_LOCATION,
+          "rate-limit",
+          `rate limited by ${wording.service}; waiting ${formatSeconds(waitMs)}, then continuing (not an error)`,
+        ),
+      );
+      await policy.sleep(waitMs);
       continue;
     }
     if (response.status >= 500) {
@@ -186,21 +373,60 @@ async function postBatch(
       await response.body?.cancel().catch(() => undefined);
       transientFailures += 1;
       if (transientFailures >= MAX_TRANSIENT_ATTEMPTS) {
-        throw new Error(`Discord kept failing (${response.status}) after ${MAX_TRANSIENT_ATTEMPTS} attempts`);
+        throw new DiagnosticError([
+          errorDiagnostic(
+            TOOL_LOCATION,
+            "unavailable",
+            `${wording.Service} kept failing (${response.status}) after ${MAX_TRANSIENT_ATTEMPTS} attempts`,
+            "the service is having trouble; run the same command again later",
+          ),
+        ]);
       }
       const delayMs = transientDelayMs(transientFailures);
-      note(`Discord returned ${response.status} — retrying in ${formatSeconds(delayMs)}`);
-      await sleep(delayMs);
+      policy.emit(
+        adviceDiagnostic(
+          TOOL_LOCATION,
+          "retry",
+          `${wording.Service} returned ${response.status}; retrying in ${formatSeconds(delayMs)}`,
+        ),
+      );
+      await policy.sleep(delayMs);
       continue;
     }
-    if (!response.ok) {
-      const bodyText = await response.text().catch(() => "");
-      throw new Error(describeApiError(response.status, bodyText, batch));
-    }
-    // Drain the (small) response body so the connection can be reused.
-    await response.text().catch(() => "");
-    return metaFromHeaders(response);
+    return response;
   }
+}
+
+interface BatchMeta {
+  remaining: number | undefined;
+  resetAfterMs: number;
+}
+
+interface MessageInfo {
+  id: string | undefined;
+  channelId: string | undefined;
+  attachments: ReadonlyArray<{ id: string | undefined; url: string | undefined }>;
+}
+
+async function postBatch(
+  policy: RequestPolicy,
+  url: string,
+  batch: readonly OutgoingFile[],
+): Promise<{ meta: BatchMeta; message: MessageInfo }> {
+  const response = await requestWithPolicy(policy, () =>
+    policy.fetchImpl(url, {
+      method: "POST",
+      body: buildForm(batch),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    }),
+  );
+  // Read the (small) body either way: it carries the rejection detail or, thanks to
+  // ?wait=true, the created message, and draining it lets the connection be reused.
+  const bodyText = await response.text().catch(() => "");
+  if (!response.ok) {
+    throw new DiagnosticError([apiErrorDiagnostic(response.status, bodyText, policy.wording, batch)]);
+  }
+  return { meta: metaFromHeaders(response), message: parseMessage(bodyText) };
 }
 
 function buildForm(batch: readonly OutgoingFile[]): FormData {
@@ -217,7 +443,7 @@ function urlWithWait(webhookUrl: string): string {
   return url.href;
 }
 
-async function rateLimitWaitMs(response: Awaited<ReturnType<FetchLike>>): Promise<number> {
+async function rateLimitWaitMs(response: UndiciResponse): Promise<number> {
   let seconds: number | undefined;
   const bodyText = await response.text().catch(() => "");
   const parsed = parseJson(bodyText);
@@ -240,7 +466,7 @@ async function rateLimitWaitMs(response: Awaited<ReturnType<FetchLike>>): Promis
   return Math.ceil(waitMs) + RATE_LIMIT_CUSHION_MS;
 }
 
-function metaFromHeaders(response: Awaited<ReturnType<FetchLike>>): BatchMeta {
+function metaFromHeaders(response: UndiciResponse): BatchMeta {
   const remainingHeader = response.headers.get("x-ratelimit-remaining");
   const resetAfterHeader = response.headers.get("x-ratelimit-reset-after");
   const remaining = remainingHeader === null ? Number.NaN : Number(remainingHeader);
@@ -251,7 +477,42 @@ function metaFromHeaders(response: Awaited<ReturnType<FetchLike>>): BatchMeta {
   };
 }
 
-function describeApiError(status: number, bodyText: string, batch: readonly OutgoingFile[]): string {
+/** The message object returned for ?wait=true; every field is optional because nothing depends on it. */
+function parseMessage(bodyText: string): MessageInfo {
+  const record = parseJson(bodyText);
+  if (!isRecord(record)) {
+    return { id: undefined, channelId: undefined, attachments: [] };
+  }
+  const rawAttachments: unknown = record["attachments"];
+  const attachments = Array.isArray(rawAttachments)
+    ? rawAttachments.map((entry: unknown) => {
+        const attachment = isRecord(entry) ? entry : {};
+        return { id: stringField(attachment, "id"), url: stringField(attachment, "url") };
+      })
+    : [];
+  return { id: stringField(record, "id"), channelId: stringField(record, "channel_id"), attachments };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function stringField(record: Record<string, unknown>, key: string): string | undefined {
+  const value = record[key];
+  return typeof value === "string" ? value : undefined;
+}
+
+function numberField(record: Record<string, unknown>, key: string): number | undefined {
+  const value = record[key];
+  return typeof value === "number" ? value : undefined;
+}
+
+function apiErrorDiagnostic(
+  status: number,
+  bodyText: string,
+  wording: Wording,
+  batch?: readonly OutgoingFile[],
+): Diagnostic {
   let detail = bodyText.slice(0, 300);
   let code: number | undefined;
   const parsed = parseJson(bodyText);
@@ -263,16 +524,53 @@ function describeApiError(status: number, bodyText: string, batch: readonly Outg
       code = parsed.code;
     }
   }
-  const names = batch.map((file) => file.name).join(", ");
-  let hint = "";
-  if (status === 413 || code === 40005) {
-    hint =
-      " — a file exceeds this server's upload limit (10 MiB by default, more on boosted servers); shrink or split it";
-  } else if (status === 401 || status === 403 || code === 10015 || code === 50027) {
-    hint = " — the webhook URL is wrong or was deleted; check DWH_WEBHOOK_URL";
+  const detailText = detail.trim() === "" ? "" : ` ${wording.scrub(detail)}`;
+  const subject =
+    batch === undefined
+      ? `${wording.Service} refused the configured URL: ${status}${detailText}`
+      : `${wording.Service} rejected ${batch.map((file) => file.name).join(", ")}: ${status}${detailText}`;
+  if (status === 413 || code === CODE_REQUEST_ENTITY_TOO_LARGE) {
+    return errorDiagnostic(TOOL_LOCATION, "rejected", subject, wording.uploadLimitHelp(largestOf(batch)));
   }
-  const detailText = detail === "" ? "" : ` ${redactWebhookTokens(detail)}`;
-  return `Discord rejected ${names}: ${status}${detailText}${hint}`;
+  if (code === CODE_UNKNOWN_CHANNEL) {
+    return errorDiagnostic(TOOL_LOCATION, "bad-destination", subject, wording.badThreadHelp);
+  }
+  if (
+    status === 401 ||
+    status === 403 ||
+    status === 404 ||
+    code === CODE_UNKNOWN_WEBHOOK ||
+    code === CODE_INVALID_WEBHOOK_TOKEN
+  ) {
+    return errorDiagnostic(TOOL_LOCATION, "bad-destination", subject, wording.badDestinationHelp);
+  }
+  if (code === CODE_INVALID_FORM_BODY) {
+    return errorDiagnostic(
+      TOOL_LOCATION,
+      "rejected",
+      subject,
+      "the request body was refused; if a filename is unusual, send that input alone with --name <plain-ascii-name>",
+    );
+  }
+  return errorDiagnostic(
+    TOOL_LOCATION,
+    "rejected",
+    subject,
+    "this is not transient; fix the input or the setup before running the same command again",
+  );
+}
+
+function largestOf(batch: readonly OutgoingFile[] | undefined): string | undefined {
+  if (batch === undefined || batch.length === 0) {
+    return undefined;
+  }
+  let largest = batch[0];
+  for (const file of batch) {
+    if (largest === undefined || file.data.byteLength > largest.data.byteLength) {
+      largest = file;
+    }
+  }
+  return largest === undefined ? undefined : `${largest.name} (${formatBytes(largest.data.byteLength)})`;
 }
 
 function parseJson(text: string): unknown {

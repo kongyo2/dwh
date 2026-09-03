@@ -34,6 +34,37 @@ jobs:
         run: |
           node dist/cli.js --version
           node dist/cli.js --help
+          node dist/cli.js send --help
+          node dist/cli.js check --help
+
+      - name: Check exit codes and diagnostics of the built CLI
+        run: |
+          # a usage error is exit 2 with one diagnostic line on stderr
+          code=0; node dist/cli.js < /dev/null 2> usage.err || code=$?
+          [ "$code" -eq 2 ] || { echo "expected exit 2, got $code"; exit 1; }
+          [ "$(wc -l < usage.err)" -eq 1 ] || { echo "expected one diagnostic line"; cat usage.err; exit 1; }
+          grep -q '^dwh: error dwh(usage): ' usage.err
+          # a missing configuration is exit 1, for send and for check alike
+          code=0; node dist/cli.js README.md 2> config.err || code=$?
+          [ "$code" -eq 1 ] || { echo "expected exit 1, got $code"; exit 1; }
+          grep -q '^dwh: error dwh(not-configured): ' config.err
+          code=0; node dist/cli.js check --json > check.json || code=$?
+          [ "$code" -eq 1 ] || { echo "expected exit 1, got $code"; exit 1; }
+          node -e "const r = JSON.parse(require('fs').readFileSync('check.json', 'utf8')); if (r.ok !== false || r.diagnostics[0].code !== 'not-configured') { process.exit(1); }"
+          # a dry run never touches the network and reports the plan
+          DWH_WEBHOOK_URL=https://discord.com/api/webhooks/1/token node dist/cli.js README.md --dry-run | grep -q '^would send README.md '
+
+      - name: Hidden destination never names the destination
+        run: |
+          {
+            DWH_HIDE_DESTINATION=1 node dist/cli.js --help
+            DWH_HIDE_DESTINATION=1 node dist/cli.js send --help
+            DWH_HIDE_DESTINATION=1 node dist/cli.js check --help
+            DWH_HIDE_DESTINATION=1 node dist/cli.js check 2>&1 || true
+            DWH_HIDE_DESTINATION=1 node dist/cli.js README.md 2>&1 || true
+            DWH_HIDE_DESTINATION=1 DWH_WEBHOOK_URL=not-a-url node dist/cli.js README.md --json 2>&1 || true
+          } > hidden.out
+          if grep -qi 'discord\|webhook' hidden.out; then echo "hidden mode leaked:"; cat hidden.out; exit 1; fi
 
       - name: Install the packed tarball into a scratch consumer
         run: |
