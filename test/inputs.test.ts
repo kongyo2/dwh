@@ -474,6 +474,17 @@ describe("scrubbing at the library boundary", () => {
     }
   });
 
+  it("refuses an encoded spelling of a webhook URL and redacts it in canonical form", async () => {
+    const [diagnostic] = await diagnosticsOfRejection(
+      resolveInputs(["https://discord.com/api/%77ebhooks/1/%73ecret-token"], {
+        fetchImpl: fetchReturning(new Response("never", { status: 200 })),
+      }),
+    );
+    expect(diagnostic?.location).toBe("https://discord.com/api/webhooks/1/<token>");
+    expect(diagnostic?.code).toBe("download-failed");
+    expect(JSON.stringify(diagnostic)).not.toMatch(/secret-token|%73ecret/);
+  });
+
   it("refuses a download whose redirect lands on the webhook, without reading the body", async () => {
     let cancelled = false;
     const landed = new Response(

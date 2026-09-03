@@ -74,7 +74,11 @@ export function resolveWebhookConfig(env: Readonly<Record<string, string | undef
   throw new DiagnosticError([errorDiagnostic(TOOL_LOCATION, "not-configured", message, help)]);
 }
 
-/** Whether a string is a webhook URL of the service (any of its hosts, any API version). */
+/**
+ * Whether a string is a webhook URL of the service (any of its hosts, any API version). The
+ * path is also checked percent-decoded, so /api/%77ebhooks/1/%74oken counts: the server would
+ * decode it the same way, and this is the guard against downloading the webhook itself.
+ */
 export function isWebhookUrl(spec: string): boolean {
   let url: URL;
   try {
@@ -82,7 +86,18 @@ export function isWebhookUrl(spec: string): boolean {
   } catch {
     return false;
   }
-  return WEBHOOK_HOSTS.has(url.hostname) && WEBHOOK_PATH_PATTERN.test(url.pathname);
+  if (!WEBHOOK_HOSTS.has(url.hostname)) {
+    return false;
+  }
+  if (WEBHOOK_PATH_PATTERN.test(url.pathname)) {
+    return true;
+  }
+  try {
+    return WEBHOOK_PATH_PATTERN.test(decodeURIComponent(url.pathname));
+  } catch {
+    // A malformed escape cannot spell a webhook path.
+    return false;
+  }
 }
 
 /** The validated webhook URL from the environment; see resolveWebhookConfig for the details. */

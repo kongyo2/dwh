@@ -43,9 +43,54 @@ export interface Wording {
   readonly scrub: (text: string) => string;
 }
 
-/** Replace webhook tokens in any text that might be logged or thrown, keeping the id. */
+/** Anything that looks like an http(s) URL, up to the first whitespace or quote-like delimiter. */
+const URL_CANDIDATE_PATTERN = /https?:\/\/[^\s"'<>)]+/gi;
+const BARE_WEBHOOK_PATH_PATTERN = /(\/api\/(?:v\d+\/)?webhooks\/\d+\/)[\w-]+/g;
+const DECODED_WEBHOOK_PATH_PATTERN = /^\/api(\/v\d+)?\/webhooks\/(\d+)\/[^/]+$/;
+
+/**
+ * Replace webhook tokens in any text that might be logged or thrown, keeping the id. A URL is
+ * parsed and its path percent-decoded first, so an encoded spelling of the path
+ * (/api/%77ebhooks/1/%74oken) is redacted in its canonical form; a bare path without a scheme
+ * is matched as written.
+ */
 export function redactWebhookTokens(text: string): string {
-  return text.replace(/(\/api\/(?:v\d+\/)?webhooks\/\d+\/)[\w-]+/g, "$1<token>");
+  return text
+    .replace(URL_CANDIDATE_PATTERN, (candidate) => canonicalRedactedWebhookUrl(candidate) ?? candidate)
+    .replace(BARE_WEBHOOK_PATH_PATTERN, "$1<token>");
+}
+
+/** The canonical, token-redacted spelling of a webhook URL, or undefined when the candidate is not one. */
+function canonicalRedactedWebhookUrl(candidate: string): string | undefined {
+  let url: URL;
+  try {
+    url = new URL(candidate);
+  } catch {
+    return undefined;
+  }
+  let pathname: string;
+  try {
+    pathname = decodeURIComponent(url.pathname);
+  } catch {
+    // A malformed escape cannot spell a webhook path; leave the text as it is.
+    return undefined;
+  }
+  const match = DECODED_WEBHOOK_PATH_PATTERN.exec(pathname);
+  if (match === null) {
+    return undefined;
+  }
+  return `${url.protocol}//${url.host}/api${match[1] ?? ""}/webhooks/${match[2] ?? ""}/<token>${url.search}`;
+}
+
+/** The service's hostnames, as the URL parser normalizes them (lowercase, percent-decoded). */
+const SERVICE_HOSTNAME_PATTERN = /(?:^|\.)discord[\w-]*\.(?:com|net|gg|new|dev|media|co)$/i;
+
+function isServiceUrl(candidate: string): boolean {
+  try {
+    return SERVICE_HOSTNAME_PATTERN.test(new URL(candidate).hostname);
+  } catch {
+    return false;
+  }
 }
 
 // The token part also accepts "<token>", so text that was redacted first still collapses to one placeholder.
@@ -70,15 +115,19 @@ const WEBHOOK_ANYWHERE_PATTERN = /webhooks?/gi;
  * The result never contains "discord" or "webhook" in any casing or position.
  */
 export function neutralize(text: string): string {
-  return text
-    .replace(WEBHOOK_URL_PATTERN, "<destination>")
-    .replace(SERVICE_URL_PATTERN, "<destination>")
-    .replace(CONFIG_VAR_PATTERN, "the dwh configuration")
-    .replace(HOST_PATTERN, "the destination")
-    .replace(DISCORD_WORD_PATTERN, "the destination")
-    .replace(WEBHOOK_WORD_PATTERN, "destination")
-    .replace(DISCORD_ANYWHERE_PATTERN, "destination")
-    .replace(WEBHOOK_ANYWHERE_PATTERN, "destination");
+  return (
+    text
+      .replace(WEBHOOK_URL_PATTERN, "<destination>")
+      // Parsing a URL normalizes its host, so an encoded spelling (https://%64iscord.com/...) is caught too.
+      .replace(URL_CANDIDATE_PATTERN, (candidate) => (isServiceUrl(candidate) ? "<destination>" : candidate))
+      .replace(SERVICE_URL_PATTERN, "<destination>")
+      .replace(CONFIG_VAR_PATTERN, "the dwh configuration")
+      .replace(HOST_PATTERN, "the destination")
+      .replace(DISCORD_WORD_PATTERN, "the destination")
+      .replace(WEBHOOK_WORD_PATTERN, "destination")
+      .replace(DISCORD_ANYWHERE_PATTERN, "destination")
+      .replace(WEBHOOK_ANYWHERE_PATTERN, "destination")
+  );
 }
 
 const DEFAULT_UPLOAD_LIMIT = "10 MiB";

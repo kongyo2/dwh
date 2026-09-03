@@ -502,6 +502,10 @@ describe("direct URLs", () => {
     expect(isWebhookUrl(WEBHOOK)).toBe(true);
     expect(isWebhookUrl(`${WEBHOOK}?thread_id=1`)).toBe(true);
     expect(isWebhookUrl("https://ptb.discord.com/api/v10/webhooks/1/t-t")).toBe(true);
+    expect(isWebhookUrl("https://discord.com/api/%77ebhooks/1/%74oken")).toBe(true);
+    expect(isWebhookUrl("https://DISCORD.COM/api/webhooks/1/t")).toBe(true);
+    expect(isWebhookUrl("https://%64iscord.com/api/webhooks/1/t")).toBe(true);
+    expect(isWebhookUrl("https://discord.com/api/webhooks/1/%zz")).toBe(false);
     expect(isWebhookUrl("https://cdn.discordapp.com/attachments/1/2/a.png")).toBe(false);
     expect(isWebhookUrl("https://example.com/api/webhooks/1/t")).toBe(false);
     expect(isWebhookUrl("not a url")).toBe(false);

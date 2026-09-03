@@ -60,13 +60,21 @@ export async function run(argv: readonly string[], io: RunIo): Promise<number> {
   try {
     parsed = parse(argv);
   } catch (error) {
-    // The flags could not be parsed, so honor a literal --json when deciding how to say so.
+    // The flags could not be parsed, so the command and --json are read off the raw arguments.
+    const command = commandNamedIn(argv);
     const reporter = makeReporter(io, wording, argv.includes("--json"), false);
     const message = firstSentence(error instanceof Error ? error.message : String(error));
     return reporter.fail(
-      [errorDiagnostic(TOOL_LOCATION, "usage", message, "run dwh --help for the options, or dwh send --help")],
+      [
+        errorDiagnostic(
+          TOOL_LOCATION,
+          "usage",
+          message,
+          `run dwh ${command} --help for the options (dwh --help lists the commands)`,
+        ),
+      ],
       EXIT_USAGE,
-      { command: "send" },
+      { command },
     );
   }
   const reporter = makeReporter(io, wording, parsed.json, parsed.quiet);
@@ -117,6 +125,28 @@ function parse(argv: readonly string[]): ParsedArgs {
     help: values.help === true,
     version: values.version === true,
   };
+}
+
+/**
+ * Which command the raw arguments name, for when they could not be parsed: the first bare
+ * token before "--", skipping options and the value of --name.
+ */
+function commandNamedIn(argv: readonly string[]): Command {
+  for (let index = 0; index < argv.length; index += 1) {
+    const token = argv[index] ?? "";
+    if (token === "--") {
+      break;
+    }
+    if (token === "--name") {
+      index += 1;
+      continue;
+    }
+    if (token.startsWith("-") && token !== "-") {
+      continue;
+    }
+    return token === "check" ? "check" : "send";
+  }
+  return "send";
 }
 
 /** Routes plain lines, advice, results, and failures to stdout/stderr according to --json and --quiet. */

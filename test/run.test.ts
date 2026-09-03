@@ -163,8 +163,15 @@ describe("usage errors", () => {
     const plain = await cli(["--bogus", "a.txt"]);
     expect(plain.code).toBe(2);
     expect(plain.stderr).toEqual([
-      "dwh: error dwh(usage): Unknown option '--bogus' help: run dwh --help for the options, or dwh send --help",
+      "dwh: error dwh(usage): Unknown option '--bogus' help: run dwh send --help for the options (dwh --help lists the commands)",
     ]);
+    const check = await cli(["check", "--bogus", "--json"]);
+    expect(check.code).toBe(2);
+    const checkPayload = parseJsonLine(check.stdout);
+    expect(checkPayload["command"]).toBe("check");
+    expect((checkPayload["diagnostics"] as Array<{ help: string }>)[0]?.help).toContain("dwh check --help");
+    const named = await cli(["--name", "check", "--bogus", "--json"]);
+    expect(parseJsonLine(named.stdout)["command"]).toBe("send");
     const missingValue = await cli(["a.txt", "--name"]);
     expect(missingValue.code).toBe(2);
     expect(missingValue.stderr[0]).toMatch(/^dwh: error dwh\(usage\): Option '--name <value>' argument missing help: /);
@@ -297,6 +304,13 @@ describe("send", () => {
     expect(hidden.stderr).toEqual([
       "<destination>: error dwh(download-failed): refusing to download this URL: it is the delivery destination itself, not a file to deliver help: pass the file you want delivered, e.g. dwh ./report.md",
     ]);
+    const encoded = await cli(["https://discord.com/api/%77ebhooks/1/%73ecret-token", "--json"], { env: configured });
+    expect(encoded.code).toBe(1);
+    expect(encoded.calls).toEqual([]);
+    expect((parseJsonLine(encoded.stdout)["diagnostics"] as Array<Record<string, unknown>>)[0]?.["location"]).toBe(
+      "https://discord.com/api/webhooks/1/<token>",
+    );
+    expect(encoded.stdout.join("\n")).not.toMatch(/secret-token|%73ecret/);
   });
 
   it("leaves the attachment URL out of the JSON when the destination is hidden", async () => {

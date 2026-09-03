@@ -94,6 +94,35 @@ describe("neutralize", () => {
   });
 });
 
+describe("percent-encoded spellings", () => {
+  it("redacts a token behind an encoded path in its canonical form", () => {
+    expect(redactWebhookTokens("see https://discord.com/api/%77ebhooks/123/%74oken now")).toBe(
+      "see https://discord.com/api/webhooks/123/<token> now",
+    );
+    expect(redactWebhookTokens("https://ptb.discord.com/api/v10/webhooks/9/tok-en_1?wait=true")).toBe(
+      "https://ptb.discord.com/api/v10/webhooks/9/<token>?wait=true",
+    );
+    expect(redactWebhookTokens("path only: /api/webhooks/1/tok")).toBe("path only: /api/webhooks/1/<token>");
+  });
+
+  it("is idempotent on already redacted text", () => {
+    const redacted = "https://discord.com/api/webhooks/1/<token> and /api/webhooks/2/<token>";
+    expect(redactWebhookTokens(redacted)).toBe(redacted);
+  });
+
+  it("leaves a malformed escape alone rather than guessing", () => {
+    expect(redactWebhookTokens("https://discord.com/api/webhooks/1/%zz")).toBe(
+      "https://discord.com/api/webhooks/1/%zz",
+    );
+  });
+
+  it("neutralizes an encoded host", () => {
+    expect(neutralize("https://%64iscord.com/api/webhooks/1/t")).toBe("<destination>");
+    expect(neutralize("from https://cdn.%64iscordapp.com/attachments/1/2/a.png ok")).toBe("from <destination> ok");
+    expect(neutralize("https://example.com/%64iscord")).toBe("https://example.com/%64iscord");
+  });
+});
+
 describe("wordingFor", () => {
   it("names the service in branded mode and never in neutral mode", () => {
     const branded = wordingFor(false);
