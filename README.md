@@ -181,7 +181,7 @@ A nonzero exit is a real failure: the diagnostic says what to change. Rate limit
 - Inputs are buffered in memory before sending; one run holds at most 512 MiB combined, transient assembly peaks included, and fails fast beyond that.
 - A file over 100 MiB fails fast; no Discord server accepts one. Between 10 and 100 MiB it depends on the server's boost tier: Discord decides, dwh relays a diagnostic naming the largest file.
 - Downloaded files are named from `Content-Disposition` or the URL path; when the name has no extension, one is added from the content type.
-- Webhook tokens never appear in any output, not even inside error text echoed from the network. A webhook URL given as an input is refused rather than downloaded (that would post the webhook object, token included, into the channel).
+- Webhook tokens never appear in any output, not even inside error text echoed from the network. A webhook URL given as an input is refused rather than downloaded (that would post the webhook object, token included, into the channel), and so is an input whose redirects land on one.
 - Nothing is interactive: no prompts, no confirmations, no TTY detection beyond refusing `-` when stdin is a terminal.
 
 ## Hiding the destination
@@ -190,7 +190,7 @@ A nonzero exit is a real failure: the diagnostic says what to change. Rate limit
 export DWH_HIDE_DESTINATION=1     # 1, true, yes, or on
 ```
 
-With this set, every word dwh emits is neutral: help pages describe delivering files "to the user", errors talk about "the destination", the `Configuration` section of the help disappears (the user has already configured it; nothing on the agent's side needs changing), `check` prints only `destination: ok`, `--json` omits the attachment URL, and any Discord URL or hostname that turns up anywhere (text from the network, an input that is a CDN link, a `source` field in JSON) is replaced with `<destination>`. Every string dwh prints passes through the same scrub, so a filename that contains those words is displayed neutralized too (the delivered file keeps its real name). The words "Discord" and "webhook" do not occur in any output, in any mode of failure; the test suite sweeps for them.
+With this set, every word dwh emits is neutral: help pages describe delivering files "to the user", errors talk about "the destination", the `Configuration` section of the help disappears (the user has already configured it; nothing on the agent's side needs changing), `check` prints only `destination: ok`, `--json` omits the attachment URL, and any Discord URL or hostname that turns up anywhere (text from the network, an input that is a CDN link, a `source` field in JSON) is replaced with `<destination>`. Every string dwh prints passes through the same scrub, so a filename that contains those words, in any casing or position (`discord_backup.zip`, `MyWebhookNotes.md`), is displayed neutralized too (the delivered file keeps its real name). The words "Discord" and "webhook" do not occur in any output, in any mode of failure; the test suite sweeps for them.
 
 Why: an agent that reads "Discord webhook" in a help page or an error often gets overprotective (it is a private server with one member), or paternalistic (it goes and reads the tool's source before running it, spending tokens and not delivering the file). Hidden mode removes the trigger. It cannot hide what the agent digs up on its own, such as the value of `DWH_WEBHOOK_URL` in the environment, but nothing dwh prints will point it there.
 

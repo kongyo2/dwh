@@ -31,7 +31,7 @@ structured output) and the compact single-line diagnostic format.
   unnamed when hidden), and `sendFiles` / `checkWebhook` validate their URL, throwing
   `invalid-config` instead of a raw `TypeError`.
 - A webhook URL given as an input is refused instead of downloaded (that would post the webhook
-  object, token included, into the channel).
+  object, token included, into the channel), and so is an input whose redirects land on one.
 - A file whose contents cannot be read even though it exists (mode 000, an I/O error) is reported
   as `unreadable` with the permission hint, not as `internal`.
 

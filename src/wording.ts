@@ -51,16 +51,23 @@ export function redactWebhookTokens(text: string): string {
 // The token part also accepts "<token>", so text that was redacted first still collapses to one placeholder.
 const WEBHOOK_URL_PATTERN =
   /https?:\/\/(?:[\w-]+\.)*discord(?:app)?\.com\/api\/(?:v\d+\/)?webhooks\/\d+\/(?:[\w-]+|<token>)(?:\?[^\s"'<>)]*)?/gi;
-// Any other URL on the service's hosts (CDN attachments, message links) is replaced whole as well.
-const SERVICE_URL_PATTERN = /https?:\/\/(?:[\w-]+\.)*discord(?:app)?\.com(?::\d+)?(?:\/[^\s"'<>)]*)?/gi;
+// Any other URL on one of the service's domains (cdn.discordapp.com, media.discordapp.net,
+// discord.gg, discordstatus.com, ...) is replaced whole as well.
+const SERVICE_DOMAIN = String.raw`(?:[\w-]+\.)*discord[\w-]*\.(?:com|net|gg|new|dev|media|co)`;
+const SERVICE_URL_PATTERN = new RegExp(String.raw`https?://${SERVICE_DOMAIN}(?::\d+)?(?:/[^\s"'<>)]*)?`, "gi");
+const HOST_PATTERN = new RegExp(String.raw`\b${SERVICE_DOMAIN}\b`, "gi");
 const CONFIG_VAR_PATTERN = /\b(?:DWH|DISCORD)_WEBHOOK_URL\b/g;
-const HOST_PATTERN = /\b(?:[\w-]+\.)*discord(?:app)?\.com\b/gi;
-const DISCORD_PATTERN = /\bdiscord\b/gi;
-const WEBHOOK_PATTERN = /\bwebhooks?\b/gi;
+// Whole words first, so prose keeps reading naturally ("Unknown destination")...
+const DISCORD_WORD_PATTERN = /\bdiscord\b/gi;
+const WEBHOOK_WORD_PATTERN = /\bwebhooks?\b/gi;
+// ...then whatever is embedded where no word boundary exists (discord_backup.zip, MyDiscordFile.txt).
+const DISCORD_ANYWHERE_PATTERN = /discord/gi;
+const WEBHOOK_ANYWHERE_PATTERN = /webhooks?/gi;
 
 /**
  * Strip every trace of the service from text, whether it came from the network, from the
  * configuration, or from an input that happens to name the service (a CDN URL, a filename).
+ * The result never contains "discord" or "webhook" in any casing or position.
  */
 export function neutralize(text: string): string {
   return text
@@ -68,8 +75,10 @@ export function neutralize(text: string): string {
     .replace(SERVICE_URL_PATTERN, "<destination>")
     .replace(CONFIG_VAR_PATTERN, "the dwh configuration")
     .replace(HOST_PATTERN, "the destination")
-    .replace(DISCORD_PATTERN, "the destination")
-    .replace(WEBHOOK_PATTERN, "destination");
+    .replace(DISCORD_WORD_PATTERN, "the destination")
+    .replace(WEBHOOK_WORD_PATTERN, "destination")
+    .replace(DISCORD_ANYWHERE_PATTERN, "destination")
+    .replace(WEBHOOK_ANYWHERE_PATTERN, "destination");
 }
 
 const DEFAULT_UPLOAD_LIMIT = "10 MiB";

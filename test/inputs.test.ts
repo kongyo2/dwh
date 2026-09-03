@@ -474,6 +474,33 @@ describe("scrubbing at the library boundary", () => {
     }
   });
 
+  it("refuses a download whose redirect lands on the webhook, without reading the body", async () => {
+    let cancelled = false;
+    const landed = new Response(
+      new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('{"token":"secret-token"}'));
+        },
+        cancel() {
+          cancelled = true;
+        },
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+    Object.defineProperty(landed, "url", { value: "https://discord.com/api/webhooks/1/secret-token" });
+    const [diagnostic] = await diagnosticsOfRejection(
+      resolveInputs(["https://example.com/short-link"], { fetchImpl: fetchReturning(landed) }),
+    );
+    expect(diagnostic).toEqual({
+      location: "https://example.com/short-link",
+      severity: "error",
+      code: "download-failed",
+      message: "refusing to download this URL: it redirects to the delivery destination itself, not a file to deliver",
+      help: "pass the file you want delivered, e.g. dwh ./report.md",
+    });
+    expect(cancelled).toBe(true);
+  });
+
   it.skipIf(process.getuid?.() === 0)("classifies a file whose contents cannot be read as unreadable", async () => {
     const dir = await scratchDir();
     const path = join(dir, "locked.txt");

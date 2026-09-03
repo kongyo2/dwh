@@ -536,8 +536,24 @@ describe("hidden destination sweep", () => {
     const huge = join(dir, "huge.bin");
     await writeFile(huge, "");
     await truncate(huge, 101 * 1024 * 1024);
+    const embedded = ["discord_backup.zip", "MyDiscordFile.txt", "my_webhook.json"].map((name) => join(dir, name));
+    for (const path of embedded) {
+      await writeFile(path, "x");
+    }
+    const png = (): Response => new Response("png", { status: 200, headers: { "content-type": "image/png" } });
+    const landedOnWebhook = (): Response => {
+      const response = new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+      Object.defineProperty(response, "url", { value: "https://discord.com/api/webhooks/1/secret-token" });
+      return response;
+    };
     const env = hiddenConfigured;
     const scenarios: Array<[string[], Scenario]> = [
+      [[...embedded], { env, responses: [message()] }],
+      [[...embedded, "--json"], { env, responses: [message()] }],
+      [[...embedded, "--dry-run"], { env }],
+      [["https://media.discordapp.net/attachments/1/2/discord.png"], { env, responses: [png(), message()] }],
+      [["https://example.com/short-link"], { env, responses: [landedOnWebhook()] }],
+      [["https://example.com/short-link", "--json"], { env, responses: [landedOnWebhook()] }],
       [["--help"], { env }],
       [["send", "--help"], { env }],
       [["check", "--help"], { env }],

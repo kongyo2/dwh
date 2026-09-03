@@ -63,10 +63,34 @@ describe("neutralize", () => {
     expect(neutralize("https://discord.com")).toBe("<destination>");
   });
 
-  it("leaves unrelated text alone, but replaces the bare words wherever they appear", () => {
+  it("leaves unrelated text alone, but replaces the words wherever they appear", () => {
     expect(neutralize("report.md: no such file")).toBe("report.md: no such file");
     expect(neutralize("https://example.com/guide.html")).toBe("https://example.com/guide.html");
     expect(neutralize("discord-export.zip")).toBe("the destination-export.zip");
+    expect(neutralize("discord_backup.zip")).toBe("destination_backup.zip");
+    expect(neutralize("MyDiscordFile.txt")).toBe("MydestinationFile.txt");
+    expect(neutralize("my_webhook.json and WEBHOOKS.md")).toBe("my_destination.json and destination.md");
+  });
+
+  it("covers the service's other domains", () => {
+    expect(neutralize("https://media.discordapp.net/attachments/1/2/a.png?width=1")).toBe("<destination>");
+    expect(neutralize("join discord.gg/abc or read discordstatus.com")).toBe(
+      "join the destination/abc or read the destination",
+    );
+  });
+
+  it("never leaves the words behind, whatever the casing or position", () => {
+    for (const text of [
+      "DISCORD",
+      "Webhook",
+      "xdiscordx",
+      "webhooks_v2",
+      "https://cdn.discordapp.com/x",
+      "https://discord.com/api/webhooks/1/<token>",
+      "DISCORD_WEBHOOK_URL=https://ptb.discord.com/api/v9/webhooks/1/t",
+    ]) {
+      expect(neutralize(text)).not.toMatch(FORBIDDEN);
+    }
   });
 });
 

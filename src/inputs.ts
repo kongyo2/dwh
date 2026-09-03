@@ -190,20 +190,26 @@ async function resolveOne(spec: string, context: ResolveContext): Promise<Outgoi
   }
   if (isUrl(spec)) {
     if (isWebhookUrl(spec)) {
-      // Downloading the webhook itself would fetch the webhook object, token included, and
-      // post it into the channel as a file. Nobody means that.
-      throw new DiagnosticError([
-        errorDiagnostic(
-          spec,
-          "download-failed",
-          "refusing to download this URL: it is the delivery destination itself, not a file to deliver",
-          "pass the file you want delivered, e.g. dwh ./report.md",
-        ),
-      ]);
+      throw refuseWebhookInput(spec, "is");
     }
     return download(spec, context);
   }
   return readLocalFile(spec, context);
+}
+
+/**
+ * A webhook URL is the destination, not a file: downloading it would fetch the webhook
+ * object, token included, and post it into the channel as a file. Nobody means that.
+ */
+function refuseWebhookInput(spec: string, how: "is" | "redirects to"): DiagnosticError {
+  return new DiagnosticError([
+    errorDiagnostic(
+      spec,
+      "download-failed",
+      `refusing to download this URL: it ${how} the delivery destination itself, not a file to deliver`,
+      "pass the file you want delivered, e.g. dwh ./report.md",
+    ),
+  ]);
 }
 
 const CONCURRENT_INPUT_RESOLVERS = 8;
@@ -413,6 +419,11 @@ async function download(url: string, context: ResolveContext): Promise<OutgoingF
       throw new DiagnosticError([
         errorDiagnostic(url, "download-failed", `GET failed: ${describeStatus(response)}`, checkHelp),
       ]);
+    }
+    if (isWebhookUrl(response.url)) {
+      // Redirects are followed, so the final URL gets the same check as the input; the body is never read.
+      await response.body?.cancel().catch(() => undefined);
+      throw refuseWebhookInput(url, "redirects to");
     }
     const declaredLength = Number(response.headers.get("content-length") ?? "");
     if (Number.isFinite(declaredLength) && declaredLength > MAX_FILE_BYTES) {
