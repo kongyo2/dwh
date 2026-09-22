@@ -13,9 +13,9 @@ import {
   resolveWebhookUrl,
   sendFiles,
 } from "../src/webhook.js";
+import { FORBIDDEN, sleepRecorder } from "./helpers.js";
 
 const WEBHOOK = "https://discord.com/api/webhooks/123456789/aBc_dEf-123";
-const FORBIDDEN = /discord|webhook/i;
 
 function file(name: string, bytes = 4): OutgoingFile {
   return { name, data: new Uint8Array(bytes), contentType: "text/plain" };
@@ -54,17 +54,6 @@ function queueFetch(...outcomes: Array<Response | Error>): {
     return outcome;
   }) as unknown as FetchLike;
   return { calls, impl };
-}
-
-function sleepRecorder(): { waits: number[]; sleep: (ms: number) => Promise<void> } {
-  const waits: number[] = [];
-  return {
-    waits,
-    sleep: (ms: number) => {
-      waits.push(ms);
-      return Promise.resolve();
-    },
-  };
 }
 
 async function rejectionOf(promise: Promise<unknown>): Promise<Error> {

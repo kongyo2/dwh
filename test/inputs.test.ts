@@ -5,8 +5,7 @@ import { describe, expect, it } from "vitest";
 import { DiagnosticError, type Diagnostic } from "../src/diagnostics.js";
 import type { FetchLike } from "../src/http.js";
 import { filenameForDownload, isUrl, resolveInputs } from "../src/inputs.js";
-
-const FORBIDDEN = /discord|webhook/i;
+import { FORBIDDEN, sleepRecorder } from "./helpers.js";
 
 function fetchReturning(response: Response): FetchLike {
   return (async () => response) as unknown as FetchLike;
@@ -26,17 +25,6 @@ function fetchSequence(...outcomes: Array<Response | Error>): { calls: number[];
     return outcome;
   }) as unknown as FetchLike;
   return { calls, impl };
-}
-
-function sleepRecorder(): { waits: number[]; sleep: (ms: number) => Promise<void> } {
-  const waits: number[] = [];
-  return {
-    waits,
-    sleep: (ms: number) => {
-      waits.push(ms);
-      return Promise.resolve();
-    },
-  };
 }
 
 function failingBodyResponse(): Response {
@@ -344,8 +332,6 @@ describe("aggregate memory bound", () => {
   it("fails fast when the combined inputs exceed the per-run total", async () => {
     const dir = await scratchDir();
     const paths = [];
-    // Six sparse files of 90 MiB each: every one passes the 100 MiB per-file check,
-    // but the 540 MiB total crosses the 512 MiB per-run budget.
     for (const name of ["a.bin", "b.bin", "c.bin", "d.bin", "e.bin", "f.bin"]) {
       const path = join(dir, name);
       await writeFile(path, "");

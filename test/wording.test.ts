@@ -7,8 +7,8 @@ import {
   wordingFor,
   wordingFromEnv,
 } from "../src/wording.js";
+import { FORBIDDEN } from "./helpers.js";
 
-const FORBIDDEN = /discord|webhook/i;
 const WEBHOOK = "https://discord.com/api/webhooks/123456789/aBc_dEf-123";
 
 describe("hideDestinationFrom", () => {
