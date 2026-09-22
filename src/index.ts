@@ -8,7 +8,7 @@ export {
   type DiagnosticCode,
   type Severity,
 } from "./diagnostics.js";
-export { describeFetchError, proxyAwareFetch, type FetchLike } from "./http.js";
+export { describeFetchError, proxyAwareFetch, type FetchLike, type RequestOptions } from "./http.js";
 export {
   filenameForDownload,
   isUrl,

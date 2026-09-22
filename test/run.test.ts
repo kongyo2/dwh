@@ -4,9 +4,9 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { FetchLike } from "../src/http.js";
 import { run, type RunIo } from "../src/run.js";
+import { FORBIDDEN } from "./helpers.js";
 
 const WEBHOOK = "https://discord.com/api/webhooks/123456789/aBc_dEf-123";
-const FORBIDDEN = /discord|webhook/i;
 
 interface Captured {
   code: number;

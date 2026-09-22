@@ -1,13 +1,6 @@
 import { EnvHttpProxyAgent, fetch as undiciFetch } from "undici";
+import { adviceDiagnostic, type Diagnostic } from "./diagnostics.js";
 
-/**
- * The fetch used for every request dwh makes.
- *
- * Node's global fetch ignores HTTP(S)_PROXY / NO_PROXY, which breaks in exactly the
- * environments coding agents run in (sandboxes, CI, corporate networks). undici's
- * EnvHttpProxyAgent honors those variables and behaves like a plain agent when they
- * are unset, so this is safe to use unconditionally.
- */
 export type FetchLike = typeof undiciFetch;
 
 let dispatcher: EnvHttpProxyAgent | undefined;
@@ -17,7 +10,6 @@ export const proxyAwareFetch: FetchLike = (input, init) => {
   return undiciFetch(input, { dispatcher, ...init });
 };
 
-/** Bounded retry policy shared by URL downloads and webhook delivery. */
 export const MAX_TRANSIENT_ATTEMPTS: number = 5;
 
 const MAX_TRANSIENT_DELAY_MS = 15_000;
@@ -36,7 +28,45 @@ export function defaultSleep(ms: number): Promise<void> {
   });
 }
 
-/** One readable line for a failed fetch, surfacing the OS-level cause code when there is one. */
+export interface RequestOptions {
+  fetchImpl?: FetchLike | undefined;
+  sleep?: ((ms: number) => Promise<void>) | undefined;
+  onDiagnostic?: ((diagnostic: Diagnostic) => void) | undefined;
+  hideDestination?: boolean | undefined;
+}
+
+export interface RetryContext {
+  readonly emit: (diagnostic: Diagnostic) => void;
+  readonly sleep: (ms: number) => Promise<void>;
+}
+
+export interface TransientFailure {
+  readonly location: string;
+  readonly note: string;
+  readonly giveUp: () => Error;
+}
+
+export interface RetryBudget {
+  readonly failed: (failure: TransientFailure) => Promise<void>;
+}
+
+export function retryBudget(context: RetryContext): RetryBudget {
+  let failures = 0;
+  return {
+    failed: async (failure) => {
+      failures += 1;
+      if (failures >= MAX_TRANSIENT_ATTEMPTS) {
+        throw failure.giveUp();
+      }
+      const delayMs = transientDelayMs(failures);
+      context.emit(
+        adviceDiagnostic(failure.location, "retry", `${failure.note}; retrying in ${formatSeconds(delayMs)}`),
+      );
+      await context.sleep(delayMs);
+    },
+  };
+}
+
 export function describeFetchError(error: unknown): string {
   if (error instanceof Error) {
     if (error.name === "TimeoutError" || error.name === "AbortError") {

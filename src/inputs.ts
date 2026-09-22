@@ -1,51 +1,33 @@
 import { readFile, stat } from "node:fs/promises";
 import { basename, dirname } from "node:path";
-import {
-  adviceDiagnostic,
-  DiagnosticError,
-  diagnosticsOf,
-  errorDiagnostic,
-  scrubDiagnostic,
-  type Diagnostic,
-} from "./diagnostics.js";
+import { DiagnosticError, diagnosticsOf, errorDiagnostic, scrubDiagnostic, type Diagnostic } from "./diagnostics.js";
 import {
   defaultSleep,
   describeFetchError,
-  formatSeconds,
   MAX_TRANSIENT_ATTEMPTS,
   proxyAwareFetch,
-  transientDelayMs,
+  retryBudget,
   type FetchLike,
+  type RequestOptions,
 } from "./http.js";
 import { formatMiB, shellQuote } from "./text.js";
 import { isWebhookUrl } from "./webhook.js";
 import { wordingFor, type Wording } from "./wording.js";
 
-/** A file ready to be attached to a message. */
 export interface OutgoingFile {
   name: string;
   data: Uint8Array;
   contentType: string;
-  /** The input spec this came from (a path, a URL, or "-" for stdin), when known. */
   source?: string | undefined;
 }
 
-export interface ResolveOptions {
-  /** Filename to show instead of the derived one. Only meaningful with a single input. */
+export interface ResolveOptions extends RequestOptions {
   nameOverride?: string | undefined;
-  fetchImpl?: FetchLike | undefined;
   readStdin?: (() => Promise<Uint8Array>) | undefined;
-  /** Progress notes worth relaying (download retries). Always severity "advice", never an error. */
-  onDiagnostic?: ((diagnostic: Diagnostic) => void) | undefined;
-  sleep?: ((ms: number) => Promise<void>) | undefined;
-  /** Word every message so that it never names the service files are delivered to. */
-  hideDestination?: boolean | undefined;
 }
 
-/** The ceiling at the highest server boost tier; nothing larger can ever be accepted. */
 export const MAX_FILE_BYTES: number = 100 * 1024 * 1024;
 
-/** Everything is buffered in memory before sending, so one run caps the combined input bytes. */
 export const MAX_TOTAL_BYTES: number = 512 * 1024 * 1024;
 
 const DOWNLOAD_TIMEOUT_MS = 300_000;
@@ -133,11 +115,6 @@ export function isUrl(spec: string): boolean {
   return /^https?:\/\//i.test(spec);
 }
 
-/**
- * Turn CLI input specs (local paths, http(s) URLs, "-" for stdin) into files ready to send.
- * All inputs are resolved before anything is sent, so a bad input never leaves a half-delivered set.
- * Every failing input is reported (one diagnostic each), not just the first one.
- */
 export async function resolveInputs(specs: readonly string[], options: ResolveOptions = {}): Promise<OutgoingFile[]> {
   const wording = wordingFor(options.hideDestination);
   const onDiagnostic = options.onDiagnostic;
@@ -145,8 +122,6 @@ export async function resolveInputs(specs: readonly string[], options: ResolveOp
     options,
     wording,
     budget: { used: 0 },
-    // Notes and thrown diagnostics alike reach the caller scrubbed: an input that is itself a
-    // webhook URL must not leak its token, and in hidden mode it must not name the service.
     emit:
       onDiagnostic === undefined
         ? () => undefined
@@ -197,10 +172,6 @@ async function resolveOne(spec: string, context: ResolveContext): Promise<Outgoi
   return readLocalFile(spec, context);
 }
 
-/**
- * A webhook URL is the destination, not a file: downloading it would fetch the webhook
- * object, token included, and post it into the channel as a file. Nobody means that.
- */
 function refuseWebhookInput(spec: string, how: "is" | "redirects to"): DiagnosticError {
   return new DiagnosticError([
     errorDiagnostic(
@@ -214,10 +185,6 @@ function refuseWebhookInput(spec: string, how: "is" | "redirects to"): Diagnosti
 
 const CONCURRENT_INPUT_RESOLVERS = 8;
 
-/**
- * Run tasks with bounded concurrency, keeping result order. Hundreds of inputs must not
- * open every file descriptor and connection at once just because they were listed together.
- */
 async function allSettledBounded<T>(
   tasks: ReadonlyArray<() => Promise<T>>,
   limit: number,
@@ -243,7 +210,6 @@ async function allSettledBounded<T>(
   return results;
 }
 
-/** Bytes retained in memory across all concurrently resolving inputs of one run. */
 interface BufferBudget {
   used: number;
 }
@@ -273,7 +239,6 @@ function tooLarge(location: string, actual: number, wording: Wording, splitSourc
   ]);
 }
 
-/** A path that could not be stat'ed or read: a vanished path is `not-found`, anything else `unreadable`. */
 function readFailure(path: string, error: unknown): DiagnosticError {
   const code = error instanceof Error ? (error as NodeJS.ErrnoException).code : undefined;
   if (code === "ENOENT" || code === "ENOTDIR") {
@@ -322,8 +287,6 @@ async function readLocalFile(path: string, context: ResolveContext): Promise<Out
     ]);
   }
   if (!info.isFile()) {
-    // A FIFO blocks readFile until a writer closes it and a device like /dev/zero never ends,
-    // so only regular files are read from a path; streams go through stdin, which is capped.
     throw new DiagnosticError([
       errorDiagnostic(
         path,
@@ -341,14 +304,10 @@ async function readLocalFile(path: string, context: ResolveContext): Promise<Out
   try {
     data = await readFile(path);
   } catch (error) {
-    // stat() succeeding says nothing about the contents being readable (mode 000, a file
-    // that vanished in between, an I/O error), so this failure is classified the same way.
     budget.used -= info.size;
     throw readFailure(path, error);
   }
   if (data.byteLength !== info.size) {
-    // The file changed between stat() and the read (say, a log still being written);
-    // the limits must hold for the bytes actually in memory, not the stale stat size.
     budget.used -= info.size;
     if (data.byteLength > MAX_FILE_BYTES) {
       throw tooLarge(path, data.byteLength, wording, path);
@@ -362,12 +321,11 @@ async function readLocalFile(path: string, context: ResolveContext): Promise<Out
 async function download(url: string, context: ResolveContext): Promise<OutgoingFile> {
   const { options, budget, wording, emit } = context;
   const fetchImpl = options.fetchImpl ?? proxyAwareFetch;
-  const sleep = options.sleep ?? defaultSleep;
+  const retry = retryBudget({ emit, sleep: options.sleep ?? defaultSleep });
   const checkHelp = `check the URL (curl -sSI ${shellQuote(url)}); it must be reachable without credentials from this machine`;
   const giveUpHelp = `the server may be down; retry later, or download it yourself and send the file`;
-  let transientFailures = 0;
-  // The whole GET (connect, status, and body) sits inside one retry boundary, with the same
-  // bounded transient-failure policy the delivery uses.
+  const downloadFailed = (message: string, help: string, cause?: ErrorOptions): DiagnosticError =>
+    new DiagnosticError([errorDiagnostic(url, "download-failed", message, help)], cause);
   for (;;) {
     let response: Awaited<ReturnType<FetchLike>>;
     try {
@@ -376,52 +334,34 @@ async function download(url: string, context: ResolveContext): Promise<OutgoingF
         signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
       });
     } catch (error) {
-      transientFailures += 1;
       const description = describeFetchError(error);
-      if (transientFailures >= MAX_TRANSIENT_ATTEMPTS) {
-        throw new DiagnosticError(
-          [
-            errorDiagnostic(
-              url,
-              "download-failed",
-              `GET failed after ${MAX_TRANSIENT_ATTEMPTS} attempts: ${description}`,
-              giveUpHelp,
-            ),
-          ],
-          { cause: error },
-        );
-      }
-      const delayMs = transientDelayMs(transientFailures);
-      emit(adviceDiagnostic(url, "retry", `GET failed (${description}); retrying in ${formatSeconds(delayMs)}`));
-      await sleep(delayMs);
+      await retry.failed({
+        location: url,
+        note: `GET failed (${description})`,
+        giveUp: () =>
+          downloadFailed(`GET failed after ${MAX_TRANSIENT_ATTEMPTS} attempts: ${description}`, giveUpHelp, {
+            cause: error,
+          }),
+      });
       continue;
     }
     if (response.status >= 500) {
-      // Cancel the unread body so the connection is released between attempts.
       await response.body?.cancel().catch(() => undefined);
-      transientFailures += 1;
-      if (transientFailures >= MAX_TRANSIENT_ATTEMPTS) {
-        throw new DiagnosticError([
-          errorDiagnostic(
-            url,
-            "download-failed",
+      await retry.failed({
+        location: url,
+        note: `GET returned ${response.status}`,
+        giveUp: () =>
+          downloadFailed(
             `GET failed: ${describeStatus(response)} (after ${MAX_TRANSIENT_ATTEMPTS} attempts)`,
             giveUpHelp,
           ),
-        ]);
-      }
-      const delayMs = transientDelayMs(transientFailures);
-      emit(adviceDiagnostic(url, "retry", `GET returned ${response.status}; retrying in ${formatSeconds(delayMs)}`));
-      await sleep(delayMs);
+      });
       continue;
     }
     if (!response.ok) {
-      throw new DiagnosticError([
-        errorDiagnostic(url, "download-failed", `GET failed: ${describeStatus(response)}`, checkHelp),
-      ]);
+      throw downloadFailed(`GET failed: ${describeStatus(response)}`, checkHelp);
     }
     if (isWebhookUrl(response.url)) {
-      // Redirects are followed, so the final URL gets the same check as the input; the body is never read.
       await response.body?.cancel().catch(() => undefined);
       throw refuseWebhookInput(url, "redirects to");
     }
@@ -434,41 +374,24 @@ async function download(url: string, context: ResolveContext): Promise<OutgoingF
       data = await readBodyCapped(response, url, budget, wording);
     } catch (error) {
       if (error instanceof DiagnosticError) {
-        // A limit was hit; a retry would hit it again.
         throw error;
       }
-      // A body that dies mid-stream is as transient as a failed connect; a fresh GET restarts it
-      // (readBodyCapped has already handed the failed attempt's bytes back to the budget).
-      transientFailures += 1;
       const description = describeFetchError(error);
-      if (transientFailures >= MAX_TRANSIENT_ATTEMPTS) {
-        throw new DiagnosticError(
-          [
-            errorDiagnostic(
-              url,
-              "download-failed",
-              `GET failed while reading the response: ${description} (after ${MAX_TRANSIENT_ATTEMPTS} attempts)`,
-              giveUpHelp,
-            ),
-          ],
-          { cause: error },
-        );
-      }
-      const delayMs = transientDelayMs(transientFailures);
-      emit(
-        adviceDiagnostic(
-          url,
-          "retry",
-          `GET failed while reading the response (${description}); retrying in ${formatSeconds(delayMs)}`,
-        ),
-      );
-      await sleep(delayMs);
+      await retry.failed({
+        location: url,
+        note: `GET failed while reading the response (${description})`,
+        giveUp: () =>
+          downloadFailed(
+            `GET failed while reading the response: ${description} (after ${MAX_TRANSIENT_ATTEMPTS} attempts)`,
+            giveUpHelp,
+            { cause: error },
+          ),
+      });
       continue;
     }
     const headerType = normalizeContentType(response.headers.get("content-type"));
     const overrideName = sanitizeFilename(options.nameOverride ?? "");
     if (overrideName !== "") {
-      // Like the local-file and stdin paths, --name also decides the content type when its extension is known.
       return { name: overrideName, data, contentType: extensionContentType(overrideName) ?? headerType, source: url };
     }
     const name = filenameForDownload(response.url || url, response.headers.get("content-disposition"), headerType);
@@ -545,20 +468,16 @@ async function readBodyCapped(
       claimed += chunk.byteLength;
       chunks.push(chunk);
     }
-    // Concatenating briefly doubles this download's bytes, so that peak counts against the
-    // run budget too; the chunk copies' share is handed back once the result buffer exists.
     claimBufferBytes(budget, total, url);
     const data = Buffer.concat(chunks);
     budget.used -= total;
     return data;
   } catch (error) {
-    // A failed attempt retains nothing, so its claim goes back (a retry claims afresh).
     budget.used -= claimed;
     throw error;
   }
 }
 
-/** Derive the filename to show for a downloaded URL. Exported for tests. */
 export function filenameForDownload(finalUrl: string, contentDisposition: string | null, contentType: string): string {
   let name = "";
   let fromHostname = false;
@@ -569,7 +488,6 @@ export function filenameForDownload(finalUrl: string, contentDisposition: string
     name = sanitizeFilename(pathBasename(finalUrl));
   }
   if (name === "") {
-    // A hostname's dots are not a file extension, so the content-type extension is always appended below.
     name = sanitizeFilename(hostnameOf(finalUrl)) || "download";
     fromHostname = true;
   }
@@ -587,9 +505,7 @@ function filenameFromContentDisposition(header: string): string | undefined {
   if (star?.[1] !== undefined) {
     try {
       return decodeURIComponent(star[1].trim());
-    } catch {
-      // fall through to the plain filename parameter
-    }
+    } catch {}
   }
   const quoted = /filename\s*=\s*"((?:[^"\\]|\\.)*)"/i.exec(header);
   if (quoted?.[1] !== undefined) {
@@ -638,7 +554,6 @@ function sanitizeFilename(name: string): string {
   }
   const extension = /\.[A-Za-z0-9]{1,8}$/.exec(trimmed)?.[0] ?? "";
   const stemBudget = MAX_FILENAME_LENGTH - extension.length;
-  // Cut between code points, not UTF-16 units: a split surrogate pair would corrupt the name.
   let stem = "";
   for (const char of trimmed) {
     if (stem.length + char.length > stemBudget) {

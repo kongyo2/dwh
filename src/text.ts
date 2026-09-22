@@ -1,5 +1,3 @@
-/** Small formatting helpers shared by the resolver, the sender, and the CLI. */
-
 export function formatBytes(bytes: number): string {
   if (bytes < 1024) {
     return `${bytes} B`;
@@ -18,7 +16,6 @@ export function formatMiB(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
 }
 
-/** Quote a word for a POSIX shell only when it needs it, so example commands stay copy-pasteable. */
 export function shellQuote(word: string): string {
   if (word !== "" && /^[\w./@:=+,%-]+$/.test(word)) {
     return word;

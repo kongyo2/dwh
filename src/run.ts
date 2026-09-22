@@ -1,32 +1,21 @@
 import { readFileSync } from "node:fs";
 import { parseArgs } from "node:util";
 import { diagnosticsOf, errorDiagnostic, formatDiagnostic, scrubDiagnostic, type Diagnostic } from "./diagnostics.js";
-import type { FetchLike } from "./http.js";
+import type { FetchLike, RequestOptions } from "./http.js";
 import { resolveInputs, type OutgoingFile } from "./inputs.js";
+import { isRecord, stringField } from "./json.js";
 import { formatBytes, plural, shellQuote } from "./text.js";
-import {
-  checkWebhook,
-  planBatches,
-  resolveWebhookConfig,
-  sendFiles,
-  type Delivery,
-  type WebhookConfig,
-  type WebhookInfo,
-} from "./webhook.js";
+import { checkWebhook, planBatches, resolveWebhookConfig, sendFiles, type Delivery } from "./webhook.js";
 import { wordingFromEnv, type Wording } from "./wording.js";
 
-/** Everything the CLI touches in its environment, so it can run under test without a process. */
 export interface RunIo {
   readonly env: Readonly<Record<string, string | undefined>>;
-  /** Receives one stdout line (or one help page) at a time, without a trailing newline. */
   readonly stdout: (text: string) => void;
   readonly stderr: (text: string) => void;
-  /** Whether stdin is a terminal; it decides the hint when no input is given. */
   readonly stdinIsTTY: boolean;
   readonly readStdin?: (() => Promise<Uint8Array>) | undefined;
   readonly fetchImpl?: FetchLike | undefined;
   readonly sleep?: ((ms: number) => Promise<void>) | undefined;
-  /** Monotonic clock in milliseconds, for durations. */
   readonly now?: (() => number) | undefined;
 }
 
@@ -42,7 +31,6 @@ const COMMANDS: ReadonlySet<string> = new Set<Command>(["send", "check"]);
 
 interface ParsedArgs {
   readonly command: Command;
-  /** Whether the command was spelled out (decides which help page -h shows). */
   readonly explicitCommand: boolean;
   readonly positionals: readonly string[];
   readonly name: string | undefined;
@@ -53,14 +41,12 @@ interface ParsedArgs {
   readonly version: boolean;
 }
 
-/** Run the CLI with the given arguments (argv without node and the script) and return the exit code. */
 export async function run(argv: readonly string[], io: RunIo): Promise<number> {
   const wording = wordingFromEnv(io.env);
   let parsed: ParsedArgs;
   try {
     parsed = parse(argv);
   } catch (error) {
-    // The flags could not be parsed, so the command and --json are read off the raw arguments.
     const command = commandNamedIn(argv);
     const reporter = makeReporter(io, wording, argv.includes("--json"), false);
     const message = firstSentence(error instanceof Error ? error.message : String(error));
@@ -107,8 +93,6 @@ function parse(argv: readonly string[]): ParsedArgs {
     strict: true,
     tokens: true,
   });
-  // The first positional names the command unless it comes after "--", which lets a file
-  // that happens to be called "send" or "check" still be sent: dwh -- check
   const terminatorAt = tokens.find((token) => token.kind === "option-terminator")?.index ?? Number.POSITIVE_INFINITY;
   const firstPositional = tokens.find((token) => token.kind === "positional");
   const explicitCommand =
@@ -127,10 +111,6 @@ function parse(argv: readonly string[]): ParsedArgs {
   };
 }
 
-/**
- * Which command the raw arguments name, for when they could not be parsed: the first bare
- * token before "--", skipping options and the value of --name.
- */
 function commandNamedIn(argv: readonly string[]): Command {
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index] ?? "";
@@ -149,15 +129,10 @@ function commandNamedIn(argv: readonly string[]): Command {
   return "send";
 }
 
-/** Routes plain lines, advice, results, and failures to stdout/stderr according to --json and --quiet. */
 interface Reporter {
-  /** A plain stdout line; dropped under --json (the JSON object is the output) and --quiet. */
   readonly line: (text: string) => void;
-  /** A progress note on stderr; dropped under --quiet. */
   readonly advice: (diagnostic: Diagnostic) => void;
-  /** Finish successfully: under --json, print the payload as one JSON line. */
   readonly succeed: (payload: Readonly<Record<string, unknown>>) => number;
-  /** Finish with diagnostics: one stderr line each, or one JSON object on stdout under --json. */
   readonly fail: (
     diagnostics: readonly Diagnostic[],
     exitCode: number,
@@ -165,10 +140,6 @@ interface Reporter {
   ) => number;
 }
 
-/**
- * Every byte the CLI prints passes through the wording's scrub: plain lines, advice, JSON
- * payloads (each string value), and diagnostics. Producers scrub too; this is the last line.
- */
 function makeReporter(io: RunIo, wording: Wording, json: boolean, quiet: boolean): Reporter {
   const scrub = (diagnostic: Diagnostic): Diagnostic => scrubDiagnostic(diagnostic, wording.scrub);
   const emitJson = (payload: Readonly<Record<string, unknown>>): void => {
@@ -205,7 +176,6 @@ function makeReporter(io: RunIo, wording: Wording, json: boolean, quiet: boolean
   };
 }
 
-/** Every string anywhere in a JSON payload passes through `scrub`; keys, numbers, booleans, and nulls stay. */
 function scrubValue(value: unknown, scrub: (text: string) => string): unknown {
   if (typeof value === "string") {
     return scrub(value);
@@ -219,10 +189,6 @@ function scrubValue(value: unknown, scrub: (text: string) => string): unknown {
   return value;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
 function jsonDiagnostic(diagnostic: Diagnostic): Record<string, unknown> {
   return {
     location: diagnostic.location,
@@ -230,6 +196,26 @@ function jsonDiagnostic(diagnostic: Diagnostic): Record<string, unknown> {
     code: diagnostic.code,
     message: diagnostic.message,
     ...(diagnostic.help === undefined ? {} : { help: diagnostic.help }),
+  };
+}
+
+type Attempt<T> =
+  { readonly ok: true; readonly value: T } | { readonly ok: false; readonly diagnostics: readonly Diagnostic[] };
+
+async function attempt<T>(step: () => T | Promise<T>): Promise<Attempt<T>> {
+  try {
+    return { ok: true, value: await step() };
+  } catch (error) {
+    return { ok: false, diagnostics: diagnosticsOf(error) };
+  }
+}
+
+function requestOptions(io: RunIo, wording: Wording, reporter: Reporter): RequestOptions {
+  return {
+    fetchImpl: io.fetchImpl,
+    sleep: io.sleep,
+    onDiagnostic: reporter.advice,
+    hideDestination: wording.hidden,
   };
 }
 
@@ -241,25 +227,21 @@ async function runSend(parsed: ParsedArgs, io: RunIo, wording: Wording, reporter
   }
   const now = io.now ?? (() => performance.now());
   const started = now();
-  let config: WebhookConfig;
-  try {
-    config = resolveWebhookConfig(io.env);
-  } catch (error) {
-    return reporter.fail(diagnosticsOf(error), EXIT_FAILURE, payload);
+  const configured = await attempt(() => resolveWebhookConfig(io.env));
+  if (!configured.ok) {
+    return reporter.fail(configured.diagnostics, EXIT_FAILURE, payload);
   }
-  let files: OutgoingFile[];
-  try {
-    files = await resolveInputs(parsed.positionals, {
+  const resolved = await attempt(() =>
+    resolveInputs(parsed.positionals, {
+      ...requestOptions(io, wording, reporter),
       nameOverride: parsed.name,
-      fetchImpl: io.fetchImpl,
-      sleep: io.sleep,
       readStdin: io.readStdin,
-      onDiagnostic: reporter.advice,
-      hideDestination: wording.hidden,
-    });
-  } catch (error) {
-    return reporter.fail(diagnosticsOf(error), EXIT_FAILURE, payload);
+    }),
+  );
+  if (!resolved.ok) {
+    return reporter.fail(resolved.diagnostics, EXIT_FAILURE, payload);
   }
+  const files = resolved.value;
   const batches = planBatches(files);
   if (parsed.dryRun) {
     const planned: Array<Record<string, unknown>> = [];
@@ -278,20 +260,17 @@ async function runSend(parsed: ParsedArgs, io: RunIo, wording: Wording, reporter
     });
   }
   const delivered: Array<Record<string, unknown>> = [];
-  try {
-    await sendFiles(config.url, files, {
-      fetchImpl: io.fetchImpl,
-      sleep: io.sleep,
-      hideDestination: wording.hidden,
-      onDiagnostic: reporter.advice,
+  const sent = await attempt(() =>
+    sendFiles(configured.value.url, files, {
+      ...requestOptions(io, wording, reporter),
       onSent: (file, delivery) => {
         reporter.line(`sent ${file.name} (${formatBytes(file.data.byteLength)})`);
         delivered.push(jsonDelivery(delivery, wording));
       },
-    });
-  } catch (error) {
-    // Files that were already accepted stay in the payload, so a consumer knows what did arrive.
-    return reporter.fail(diagnosticsOf(error), EXIT_FAILURE, {
+    }),
+  );
+  if (!sent.ok) {
+    return reporter.fail(sent.diagnostics, EXIT_FAILURE, {
       ...payload,
       files: delivered,
       messages: batches.length,
@@ -337,23 +316,16 @@ async function runCheck(parsed: ParsedArgs, io: RunIo, wording: Wording, reporte
   if (usage !== undefined) {
     return reporter.fail([usage], EXIT_USAGE, payload);
   }
-  let config: WebhookConfig;
-  try {
-    config = resolveWebhookConfig(io.env);
-  } catch (error) {
-    return reporter.fail(diagnosticsOf(error), EXIT_FAILURE, payload);
+  const configured = await attempt(() => resolveWebhookConfig(io.env));
+  if (!configured.ok) {
+    return reporter.fail(configured.diagnostics, EXIT_FAILURE, payload);
   }
-  let info: WebhookInfo;
-  try {
-    info = await checkWebhook(config.url, {
-      fetchImpl: io.fetchImpl,
-      sleep: io.sleep,
-      hideDestination: wording.hidden,
-      onDiagnostic: reporter.advice,
-    });
-  } catch (error) {
-    return reporter.fail(diagnosticsOf(error), EXIT_FAILURE, payload);
+  const config = configured.value;
+  const checked = await attempt(() => checkWebhook(config.url, requestOptions(io, wording, reporter)));
+  if (!checked.ok) {
+    return reporter.fail(checked.diagnostics, EXIT_FAILURE, payload);
   }
+  const info = checked.value;
   if (wording.hidden) {
     reporter.line("destination: ok");
     return reporter.succeed(payload);
@@ -417,12 +389,10 @@ function jsonDelivery(delivery: Delivery, wording: Wording): Record<string, unkn
     message: delivery.message,
     message_id: delivery.messageId ?? null,
     attachment_id: delivery.attachmentId ?? null,
-    // The attachment URL names the service's CDN, so hidden mode leaves it out entirely.
     ...(wording.hidden ? {} : { url: delivery.url ?? null }),
   };
 }
 
-/** parseArgs explains itself at length; the first sentence is the diagnostic, the help tail says where to look. */
 function firstSentence(text: string): string {
   const cut = text.indexOf(". ");
   const sentence = cut === -1 ? text : text.slice(0, cut);
@@ -432,10 +402,7 @@ function firstSentence(text: string): string {
 function packageVersion(): string {
   const raw = readFileSync(new URL("../package.json", import.meta.url), "utf8");
   const parsed: unknown = JSON.parse(raw);
-  if (typeof parsed === "object" && parsed !== null && "version" in parsed && typeof parsed.version === "string") {
-    return parsed.version;
-  }
-  return "unknown";
+  return (isRecord(parsed) ? stringField(parsed, "version") : undefined) ?? "unknown";
 }
 
 const EXIT_CODES_LINE = "Exit codes: 0 done   1 configuration, input, or delivery failure   2 usage error";
