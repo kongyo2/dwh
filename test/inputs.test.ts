@@ -1,10 +1,12 @@
 import { chmod, mkdtemp, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
 import { describe, expect, it } from "vitest";
-import { DiagnosticError, type Diagnostic } from "../src/diagnostics.js";
-import type { FetchLike } from "../src/http.js";
-import { filenameForDownload, isUrl, resolveInputs } from "../src/inputs.js";
+
+import type { FetchLike } from "../src/api/http.js";
+import { filenameForDownload, isUrl, resolveInputs } from "../src/commands/send/inputs.js";
+import { DiagnosticError, type Diagnostic } from "../src/lib/diagnostics.js";
 import { FORBIDDEN, sleepRecorder } from "./helpers.js";
 
 function fetchReturning(response: Response): FetchLike {
@@ -112,7 +114,9 @@ describe("resolveInputs with local files", () => {
   it("rejects non-regular files such as devices, pointing at stdin", async () => {
     const [diagnostic] = await diagnosticsOfRejection(resolveInputs(["/dev/null"]));
     expect(diagnostic?.code).toBe("not-regular-file");
-    expect(diagnostic?.help).toBe("pipe it through stdin instead: cat /dev/null | dwh - --name null");
+    expect(diagnostic?.help).toBe(
+      "pipe it through stdin instead: cat /dev/null | dwh - --name null",
+    );
   });
 
   it("quotes paths that need it in example commands", async () => {
@@ -144,7 +148,9 @@ describe("resolveInputs with local files", () => {
     expect(branded?.code).toBe("too-large");
     expect(branded?.message).toBe("101.0 MiB exceeds Discord's absolute limit of 100.0 MiB");
     expect(branded?.help).toContain("split -b 9M");
-    const [neutral] = await diagnosticsOfRejection(resolveInputs([path], { hideDestination: true }));
+    const [neutral] = await diagnosticsOfRejection(
+      resolveInputs([path], { hideDestination: true }),
+    );
     expect(neutral?.message).toBe("101.0 MiB exceeds the absolute per-file limit of 100.0 MiB");
     expect(`${neutral?.message} ${neutral?.help}`).not.toMatch(FORBIDDEN);
   });
@@ -190,7 +196,10 @@ describe("resolveInputs with URLs", () => {
   });
 
   it("keeps the response content type when --name has no known extension", async () => {
-    const response = new Response("data", { status: 200, headers: { "content-type": "text/plain" } });
+    const response = new Response("data", {
+      status: 200,
+      headers: { "content-type": "text/plain" },
+    });
     const [resolved] = await resolveInputs(["https://example.com/raw"], {
       nameOverride: "weird.unknownext",
       fetchImpl: fetchReturning(response),
@@ -216,13 +225,21 @@ describe("resolveInputs with URLs", () => {
     expect(calls).toHaveLength(2);
     expect(waits).toEqual([1000]);
     expect(notes).toHaveLength(1);
-    expect(notes[0]).toMatchObject({ location: "https://example.com/flaky.txt", severity: "advice", code: "retry" });
+    expect(notes[0]).toMatchObject({
+      location: "https://example.com/flaky.txt",
+      severity: "advice",
+      code: "retry",
+    });
   });
 
   it("names the URL when the response body keeps failing mid-read", async () => {
-    const { calls, impl } = fetchSequence(...Array.from({ length: 5 }, () => failingBodyResponse()));
+    const { calls, impl } = fetchSequence(
+      ...Array.from({ length: 5 }, () => failingBodyResponse()),
+    );
     const { waits, sleep } = sleepRecorder();
-    await expect(resolveInputs(["https://example.com/flaky.txt"], { fetchImpl: impl, sleep })).rejects.toThrow(
+    await expect(
+      resolveInputs(["https://example.com/flaky.txt"], { fetchImpl: impl, sleep }),
+    ).rejects.toThrow(
       /^https:\/\/example\.com\/flaky\.txt: error dwh\(download-failed\): GET failed while reading the response: .* \(after 5 attempts\) help: /,
     );
     expect(calls).toHaveLength(5);
@@ -236,18 +253,23 @@ describe("resolveInputs with URLs", () => {
       new Response("ok", { status: 200, headers: { "content-type": "text/plain" } }),
     );
     const { waits, sleep } = sleepRecorder();
-    const [resolved] = await resolveInputs(["https://example.com/flappy.txt"], { fetchImpl: impl, sleep });
+    const [resolved] = await resolveInputs(["https://example.com/flappy.txt"], {
+      fetchImpl: impl,
+      sleep,
+    });
     expect(resolved?.name).toBe("flappy.txt");
     expect(calls).toHaveLength(3);
     expect(waits).toEqual([1000, 2000]);
   });
 
   it("gives up on a download after five transient failures", async () => {
-    const { calls, impl } = fetchSequence(...Array.from({ length: 5 }, () => new Response("", { status: 500 })));
-    const { sleep } = sleepRecorder();
-    await expect(resolveInputs(["https://example.com/down.txt"], { fetchImpl: impl, sleep })).rejects.toThrow(
-      /after 5 attempts/,
+    const { calls, impl } = fetchSequence(
+      ...Array.from({ length: 5 }, () => new Response("", { status: 500 })),
     );
+    const { sleep } = sleepRecorder();
+    await expect(
+      resolveInputs(["https://example.com/down.txt"], { fetchImpl: impl, sleep }),
+    ).rejects.toThrow(/after 5 attempts/);
     expect(calls).toHaveLength(5);
   });
 
@@ -260,7 +282,10 @@ describe("resolveInputs with URLs", () => {
       resolveInputs(["https://example.com/huge.bin"], { fetchImpl: fetchReturning(response) }),
     ).rejects.toThrow(/exceeds Discord's absolute limit/);
     const [neutral] = await diagnosticsOfRejection(
-      resolveInputs(["https://example.com/huge.bin"], { fetchImpl: fetchReturning(response), hideDestination: true }),
+      resolveInputs(["https://example.com/huge.bin"], {
+        fetchImpl: fetchReturning(response),
+        hideDestination: true,
+      }),
     );
     expect(neutral?.code).toBe("too-large");
     expect(`${neutral?.message} ${neutral?.help}`).not.toMatch(FORBIDDEN);
@@ -269,7 +294,9 @@ describe("resolveInputs with URLs", () => {
 
 describe("filenameForDownload", () => {
   it("uses the last path segment when it has an extension", () => {
-    expect(filenameForDownload("https://example.com/docs/guide.md", null, "text/markdown")).toBe("guide.md");
+    expect(filenameForDownload("https://example.com/docs/guide.md", null, "text/markdown")).toBe(
+      "guide.md",
+    );
   });
 
   it("decodes percent-encoded names", () => {
@@ -278,24 +305,34 @@ describe("filenameForDownload", () => {
   });
 
   it("appends an extension from the content type when the segment has none", () => {
-    expect(filenameForDownload("https://example.com/api/data", null, "application/json")).toBe("data.json");
+    expect(filenameForDownload("https://example.com/api/data", null, "application/json")).toBe(
+      "data.json",
+    );
     expect(filenameForDownload("https://example.com/blog/", null, "text/html")).toBe("blog.html");
   });
 
   it("falls back to the hostname for a bare origin", () => {
     expect(filenameForDownload("https://example.com/", null, "text/html")).toBe("example.com.html");
-    expect(filenameForDownload("https://example.com/", null, "application/octet-stream")).toBe("example.com");
+    expect(filenameForDownload("https://example.com/", null, "application/octet-stream")).toBe(
+      "example.com",
+    );
   });
 
   it("appends extensions for the whole reverse content-type map", () => {
     expect(filenameForDownload("https://example.com/media", null, "video/mp4")).toBe("media.mp4");
-    expect(filenameForDownload("https://example.com/dump", null, "application/gzip")).toBe("dump.gz");
+    expect(filenameForDownload("https://example.com/dump", null, "application/gzip")).toBe(
+      "dump.gz",
+    );
   });
 
   it("parses Content-Disposition parameter names case-insensitively", () => {
-    expect(filenameForDownload("https://example.com/x", 'attachment; Filename="report.pdf"', "application/pdf")).toBe(
-      "report.pdf",
-    );
+    expect(
+      filenameForDownload(
+        "https://example.com/x",
+        'attachment; Filename="report.pdf"',
+        "application/pdf",
+      ),
+    ).toBe("report.pdf");
   });
 
   it("accepts an RFC 5987 language tag in extended filenames", () => {
@@ -310,7 +347,11 @@ describe("filenameForDownload", () => {
 
   it("prefers the content-disposition filename", () => {
     expect(
-      filenameForDownload("https://example.com/x", 'attachment; filename="report final.pdf"', "application/pdf"),
+      filenameForDownload(
+        "https://example.com/x",
+        'attachment; filename="report final.pdf"',
+        "application/pdf",
+      ),
     ).toBe("report final.pdf");
     expect(
       filenameForDownload(
@@ -322,9 +363,13 @@ describe("filenameForDownload", () => {
   });
 
   it("never returns a path, only a basename", () => {
-    expect(filenameForDownload("https://example.com/x", 'attachment; filename="../../etc/passwd"', "text/plain")).toBe(
-      "passwd.txt",
-    );
+    expect(
+      filenameForDownload(
+        "https://example.com/x",
+        'attachment; filename="../../etc/passwd"',
+        "text/plain",
+      ),
+    ).toBe("passwd.txt");
   });
 });
 
@@ -350,7 +395,10 @@ describe("aggregate memory bound", () => {
 describe("bounded concurrent resolution", () => {
   it("preserves input order with more inputs than workers", async () => {
     const dir = await scratchDir();
-    const names = Array.from({ length: 20 }, (_, index) => `f${String(index).padStart(2, "0")}.txt`);
+    const names = Array.from(
+      { length: 20 },
+      (_, index) => `f${String(index).padStart(2, "0")}.txt`,
+    );
     for (const name of names) {
       await writeFile(join(dir, name), name);
     }
@@ -412,7 +460,12 @@ describe("resolveInputs with stdin", () => {
     const [diagnostic] = await diagnosticsOfRejection(
       resolveInputs(["-"], { readStdin: () => Promise.reject(new Error("closed")) }),
     );
-    expect(diagnostic).toEqual({ location: "stdin", severity: "error", code: "internal", message: "closed" });
+    expect(diagnostic).toEqual({
+      location: "stdin",
+      severity: "error",
+      code: "internal",
+      message: "closed",
+    });
   });
 });
 
@@ -484,7 +537,9 @@ describe("scrubbing at the library boundary", () => {
       }),
       { status: 200, headers: { "content-type": "application/json" } },
     );
-    Object.defineProperty(landed, "url", { value: "https://discord.com/api/webhooks/1/secret-token" });
+    Object.defineProperty(landed, "url", {
+      value: "https://discord.com/api/webhooks/1/secret-token",
+    });
     const [diagnostic] = await diagnosticsOfRejection(
       resolveInputs(["https://example.com/short-link"], { fetchImpl: fetchReturning(landed) }),
     );
@@ -492,24 +547,28 @@ describe("scrubbing at the library boundary", () => {
       location: "https://example.com/short-link",
       severity: "error",
       code: "download-failed",
-      message: "refusing to download this URL: it redirects to the delivery destination itself, not a file to deliver",
+      message:
+        "refusing to download this URL: it redirects to the delivery destination itself, not a file to deliver",
       help: "pass the file you want delivered, e.g. dwh ./report.md",
     });
     expect(cancelled).toBe(true);
   });
 
-  it.skipIf(process.getuid?.() === 0)("classifies a file whose contents cannot be read as unreadable", async () => {
-    const dir = await scratchDir();
-    const path = join(dir, "locked.txt");
-    await writeFile(path, "secret");
-    await chmod(path, 0o000);
-    const [diagnostic] = await diagnosticsOfRejection(resolveInputs([path]));
-    expect(diagnostic).toEqual({
-      location: path,
-      severity: "error",
-      code: "unreadable",
-      message: "cannot read (EACCES)",
-      help: `check permissions: ls -la ${path}`,
-    });
-  });
+  it.skipIf(process.getuid?.() === 0)(
+    "classifies a file whose contents cannot be read as unreadable",
+    async () => {
+      const dir = await scratchDir();
+      const path = join(dir, "locked.txt");
+      await writeFile(path, "secret");
+      await chmod(path, 0o000);
+      const [diagnostic] = await diagnosticsOfRejection(resolveInputs([path]));
+      expect(diagnostic).toEqual({
+        location: path,
+        severity: "error",
+        code: "unreadable",
+        message: "cannot read (EACCES)",
+        help: `check permissions: ls -la ${path}`,
+      });
+    },
+  );
 });

@@ -1,8 +1,0 @@
-{
-  "printWidth": 120,
-  "objectWrap": "preserve",
-  "trailingComma": "all",
-  "arrowParens": "always",
-  "semi": true,
-  "endOfLine": "lf"
-}

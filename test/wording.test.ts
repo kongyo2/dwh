@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+
 import {
   HIDE_DESTINATION_ENV_VAR,
   hideDestinationFrom,
@@ -6,7 +7,7 @@ import {
   redactWebhookTokens,
   wordingFor,
   wordingFromEnv,
-} from "../src/wording.js";
+} from "../src/lib/wording.js";
 import { FORBIDDEN } from "./helpers.js";
 
 const WEBHOOK = "https://discord.com/api/webhooks/123456789/aBc_dEf-123";
@@ -33,7 +34,9 @@ describe("hideDestinationFrom", () => {
 
 describe("redactWebhookTokens", () => {
   it("keeps the id but hides the token", () => {
-    const redacted = redactWebhookTokens(`error at ${WEBHOOK} and https://discord.com/api/v10/webhooks/9/tok-en_1`);
+    const redacted = redactWebhookTokens(
+      `error at ${WEBHOOK} and https://discord.com/api/v10/webhooks/9/tok-en_1`,
+    );
     expect(redacted).toBe(
       "error at https://discord.com/api/webhooks/123456789/<token> and https://discord.com/api/v10/webhooks/9/<token>",
     );
@@ -42,15 +45,23 @@ describe("redactWebhookTokens", () => {
 
 describe("neutralize", () => {
   it("replaces whole webhook URLs, query string included", () => {
-    expect(neutralize(`fetch failed for ${WEBHOOK}?wait=true&thread_id=4`)).toBe("fetch failed for <destination>");
-    expect(neutralize("see https://ptb.discord.com/api/v10/webhooks/1/t-t")).toBe("see <destination>");
+    expect(neutralize(`fetch failed for ${WEBHOOK}?wait=true&thread_id=4`)).toBe(
+      "fetch failed for <destination>",
+    );
+    expect(neutralize("see https://ptb.discord.com/api/v10/webhooks/1/t-t")).toBe(
+      "see <destination>",
+    );
   });
 
   it("replaces hostnames, the brand, the word webhook, and the configuration variable names", () => {
     expect(neutralize("Unknown Webhook")).toBe("Unknown destination");
-    expect(neutralize("getaddrinfo ENOTFOUND discord.com")).toBe("getaddrinfo ENOTFOUND the destination");
+    expect(neutralize("getaddrinfo ENOTFOUND discord.com")).toBe(
+      "getaddrinfo ENOTFOUND the destination",
+    );
     expect(neutralize("cdn.discordapp.com is slow")).toBe("the destination is slow");
-    expect(neutralize("Discord rejected it; the webhooks list; DISCORD_WEBHOOK_URL and DWH_WEBHOOK_URL")).toBe(
+    expect(
+      neutralize("Discord rejected it; the webhooks list; DISCORD_WEBHOOK_URL and DWH_WEBHOOK_URL"),
+    ).toBe(
       "the destination rejected it; the destination list; the dwh configuration and the dwh configuration",
     );
   });
@@ -69,11 +80,15 @@ describe("neutralize", () => {
     expect(neutralize("discord-export.zip")).toBe("the destination-export.zip");
     expect(neutralize("discord_backup.zip")).toBe("destination_backup.zip");
     expect(neutralize("MyDiscordFile.txt")).toBe("MydestinationFile.txt");
-    expect(neutralize("my_webhook.json and WEBHOOKS.md")).toBe("my_destination.json and destination.md");
+    expect(neutralize("my_webhook.json and WEBHOOKS.md")).toBe(
+      "my_destination.json and destination.md",
+    );
   });
 
   it("covers the service's other domains", () => {
-    expect(neutralize("https://media.discordapp.net/attachments/1/2/a.png?width=1")).toBe("<destination>");
+    expect(neutralize("https://media.discordapp.net/attachments/1/2/a.png?width=1")).toBe(
+      "<destination>",
+    );
     expect(neutralize("join discord.gg/abc or read discordstatus.com")).toBe(
       "join the destination/abc or read the destination",
     );
@@ -99,10 +114,12 @@ describe("percent-encoded spellings", () => {
     expect(redactWebhookTokens("see https://discord.com/api/%77ebhooks/123/%74oken now")).toBe(
       "see https://discord.com/api/webhooks/123/<token> now",
     );
-    expect(redactWebhookTokens("https://ptb.discord.com/api/v10/webhooks/9/tok-en_1?wait=true")).toBe(
-      "https://ptb.discord.com/api/v10/webhooks/9/<token>?wait=true",
+    expect(
+      redactWebhookTokens("https://ptb.discord.com/api/v10/webhooks/9/tok-en_1?wait=true"),
+    ).toBe("https://ptb.discord.com/api/v10/webhooks/9/<token>?wait=true");
+    expect(redactWebhookTokens("path only: /api/webhooks/1/tok")).toBe(
+      "path only: /api/webhooks/1/<token>",
     );
-    expect(redactWebhookTokens("path only: /api/webhooks/1/tok")).toBe("path only: /api/webhooks/1/<token>");
   });
 
   it("is idempotent on already redacted text", () => {
@@ -118,7 +135,9 @@ describe("percent-encoded spellings", () => {
 
   it("neutralizes an encoded host", () => {
     expect(neutralize("https://%64iscord.com/api/webhooks/1/t")).toBe("<destination>");
-    expect(neutralize("from https://cdn.%64iscordapp.com/attachments/1/2/a.png ok")).toBe("from <destination> ok");
+    expect(neutralize("from https://cdn.%64iscordapp.com/attachments/1/2/a.png ok")).toBe(
+      "from <destination> ok",
+    );
     expect(neutralize("https://example.com/%64iscord")).toBe("https://example.com/%64iscord");
   });
 });
@@ -134,8 +153,8 @@ describe("wordingFor", () => {
       neutral.service,
       neutral.Service,
       neutral.tooLarge("120.0 MiB", "100.0 MiB"),
-      neutral.uploadLimitHelp("big.bin (30.0 MiB)"),
-      neutral.uploadLimitHelp(undefined),
+      neutral.uploadLimitHelp("big.bin (30.0 MiB)", "10 MiB"),
+      neutral.uploadLimitHelp(undefined, "10 MiB"),
       neutral.badDestinationHelp,
       neutral.badThreadHelp,
       neutral.notConfigured.message,

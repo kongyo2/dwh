@@ -1,8 +1,10 @@
 import { mkdtemp, readFile, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
 import { describe, expect, it } from "vitest";
-import type { FetchLike } from "../src/http.js";
+
+import type { FetchLike } from "../src/api/http.js";
 import { run, type RunIo } from "../src/run.js";
 import { FORBIDDEN } from "./helpers.js";
 
@@ -68,15 +70,21 @@ function rejection(status: number, body: unknown): Response {
 }
 
 function rateLimited(seconds: number): Response {
-  return new Response(JSON.stringify({ message: "You are being rate limited.", retry_after: seconds }), {
-    status: 429,
-  });
+  return new Response(
+    JSON.stringify({ message: "You are being rate limited.", retry_after: seconds }),
+    {
+      status: 429,
+    },
+  );
 }
 
 function webhookObject(name = "build-bot"): Response {
-  return new Response(JSON.stringify({ id: "223", name, type: 1, channel_id: "199", guild_id: "56" }), {
-    status: 200,
-  });
+  return new Response(
+    JSON.stringify({ id: "223", name, type: 1, channel_id: "199", guild_id: "56" }),
+    {
+      status: 200,
+    },
+  );
 }
 
 async function scratchFile(name: string, content = "content"): Promise<string> {
@@ -136,7 +144,9 @@ describe("help", () => {
 
   it("prints the package version", async () => {
     const { code, stdout } = await cli(["--version"]);
-    const pkg = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")) as { version: string };
+    const pkg = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")) as {
+      version: string;
+    };
     expect(code).toBe(0);
     expect(stdout).toEqual([pkg.version]);
   });
@@ -169,12 +179,16 @@ describe("usage errors", () => {
     expect(check.code).toBe(2);
     const checkPayload = parseJsonLine(check.stdout);
     expect(checkPayload["command"]).toBe("check");
-    expect((checkPayload["diagnostics"] as Array<{ help: string }>)[0]?.help).toContain("dwh check --help");
+    expect((checkPayload["diagnostics"] as Array<{ help: string }>)[0]?.help).toContain(
+      "dwh check --help",
+    );
     const named = await cli(["--name", "check", "--bogus", "--json"]);
     expect(parseJsonLine(named.stdout)["command"]).toBe("send");
     const missingValue = await cli(["a.txt", "--name"]);
     expect(missingValue.code).toBe(2);
-    expect(missingValue.stderr[0]).toMatch(/^dwh: error dwh\(usage\): Option '--name <value>' argument missing help: /);
+    expect(missingValue.stderr[0]).toMatch(
+      /^dwh: error dwh\(usage\): Option '--name <value>' argument missing help: /,
+    );
     const json = await cli(["--bogus", "a.txt", "--json"]);
     expect(json.code).toBe(2);
     expect(json.stderr).toEqual([]);
@@ -184,7 +198,9 @@ describe("usage errors", () => {
   });
 
   it("explains --name with several inputs using a copy-pasteable fix", async () => {
-    const { code, stderr } = await cli(["a.txt", "b c.txt", "--name", "x.txt"], { env: configured });
+    const { code, stderr } = await cli(["a.txt", "b c.txt", "--name", "x.txt"], {
+      env: configured,
+    });
     expect(code).toBe(2);
     expect(stderr).toEqual([
       "dwh: error dwh(usage): --name applies to a single input, but 2 inputs were given help: drop --name, or send that input alone: dwh a.txt --name x.txt",
@@ -201,15 +217,26 @@ describe("usage errors", () => {
     expect((await cli(["check", "a.txt"], { env: configured })).stderr[0]).toContain(
       "check takes no inputs (got a.txt) help: run dwh check by itself; to send that file run dwh send a.txt",
     );
-    expect((await cli(["check", "--name", "x"], { env: configured })).code).toBe(2);
-    expect((await cli(["check", "--dry-run"], { env: configured })).code).toBe(2);
+    const name = await cli(["check", "--name", "x"], { env: configured });
+    expect(name.code).toBe(2);
+    expect(name.stderr).toEqual([
+      "dwh: error dwh(usage): --name is not a check option help: dwh check takes only --json and --quiet",
+    ]);
+    const dryRun = await cli(["check", "--dry-run"], { env: configured });
+    expect(dryRun.code).toBe(2);
+    expect(dryRun.stderr).toEqual([
+      "dwh: error dwh(usage): --dry-run is not a check option help: check never sends anything; run dwh check",
+    ]);
   });
 });
 
 describe("send", () => {
   it("posts the file with wait=true and prints one sent line", async () => {
     const path = await scratchFile("report.md", "# hi");
-    const { code, stdout, stderr, calls } = await cli([path], { env: configured, responses: [message()] });
+    const { code, stdout, stderr, calls } = await cli([path], {
+      env: configured,
+      responses: [message()],
+    });
     expect(code).toBe(0);
     expect(stdout).toEqual(["sent report.md (4 B)"]);
     expect(stderr).toEqual([]);
@@ -276,20 +303,31 @@ describe("send", () => {
     const source = "https://cdn.discordapp.com/attachments/1/2/discord-export.zip";
     const download = (): Response =>
       new Response("zip", { status: 200, headers: { "content-type": "application/zip" } });
-    const plain = await cli([source], { env: hiddenConfigured, responses: [download(), message()] });
+    const plain = await cli([source], {
+      env: hiddenConfigured,
+      responses: [download(), message()],
+    });
     expect(plain.code).toBe(0);
     expect(plain.stdout).toEqual(["sent the destination-export.zip (3 B)"]);
-    const json = await cli([source, "--json"], { env: hiddenConfigured, responses: [download(), message()] });
+    const json = await cli([source, "--json"], {
+      env: hiddenConfigured,
+      responses: [download(), message()],
+    });
     const payload = parseJsonLine(json.stdout);
     expect(payload["ok"]).toBe(true);
-    expect((payload["files"] as Array<Record<string, unknown>>)[0]?.["source"]).toBe("<destination>");
+    expect((payload["files"] as Array<Record<string, unknown>>)[0]?.["source"]).toBe(
+      "<destination>",
+    );
     expect(json.stdout.join("\n")).not.toMatch(FORBIDDEN);
   });
 
   it("refuses a webhook URL as an input and never prints its token", async () => {
-    const { code, stdout, stderr, calls } = await cli(["https://discord.com/api/webhooks/1/secret-token", "--json"], {
-      env: configured,
-    });
+    const { code, stdout, stderr, calls } = await cli(
+      ["https://discord.com/api/webhooks/1/secret-token", "--json"],
+      {
+        env: configured,
+      },
+    );
     expect(code).toBe(1);
     expect(calls).toEqual([]);
     expect(stderr).toEqual([]);
@@ -300,16 +338,22 @@ describe("send", () => {
       code: "download-failed",
     });
     expect(stdout.join("\n")).not.toContain("secret-token");
-    const hidden = await cli(["https://discord.com/api/webhooks/1/secret-token"], { env: hiddenConfigured });
+    const hidden = await cli(["https://discord.com/api/webhooks/1/secret-token"], {
+      env: hiddenConfigured,
+    });
     expect(hidden.stderr).toEqual([
       "<destination>: error dwh(download-failed): refusing to download this URL: it is the delivery destination itself, not a file to deliver help: pass the file you want delivered, e.g. dwh ./report.md",
     ]);
-    const encoded = await cli(["https://discord.com/api/%77ebhooks/1/%73ecret-token", "--json"], { env: configured });
+    const encoded = await cli(["https://discord.com/api/%77ebhooks/1/%73ecret-token", "--json"], {
+      env: configured,
+    });
     expect(encoded.code).toBe(1);
     expect(encoded.calls).toEqual([]);
-    expect((parseJsonLine(encoded.stdout)["diagnostics"] as Array<Record<string, unknown>>)[0]?.["location"]).toBe(
-      "https://discord.com/api/webhooks/1/<token>",
-    );
+    expect(
+      (parseJsonLine(encoded.stdout)["diagnostics"] as Array<Record<string, unknown>>)[0]?.[
+        "location"
+      ],
+    ).toBe("https://discord.com/api/webhooks/1/<token>");
     expect(encoded.stdout.join("\n")).not.toMatch(/secret-token|%73ecret/);
   });
 
@@ -333,11 +377,17 @@ describe("send", () => {
     expect(noisy.stderr).toEqual([
       "dwh: advice dwh(rate-limit): rate limited by Discord; waiting 2.8s, then continuing (not an error)",
     ]);
-    const quiet = await cli([path, "--quiet"], { env: configured, responses: [rateLimited(2.5), message()] });
+    const quiet = await cli([path, "--quiet"], {
+      env: configured,
+      responses: [rateLimited(2.5), message()],
+    });
     expect(quiet.code).toBe(0);
     expect(quiet.stdout).toEqual([]);
     expect(quiet.stderr).toEqual([]);
-    const hidden = await cli([path], { env: hiddenConfigured, responses: [rateLimited(2.5), message()] });
+    const hidden = await cli([path], {
+      env: hiddenConfigured,
+      responses: [rateLimited(2.5), message()],
+    });
     expect(hidden.stderr).toEqual([
       "dwh: advice dwh(rate-limit): rate limited by the destination; waiting 2.8s, then continuing (not an error)",
     ]);
@@ -358,7 +408,10 @@ describe("send", () => {
     const planned = await cli([path, "--dry-run"], { env: configured });
     expect(planned.code).toBe(0);
     expect(planned.calls).toEqual([]);
-    expect(planned.stdout).toEqual(["would send report.md (4 B)", "dry run: 1 file in 1 message; nothing was sent"]);
+    expect(planned.stdout).toEqual([
+      "would send report.md (4 B)",
+      "dry run: 1 file in 1 message; nothing was sent",
+    ]);
     const json = await cli([path, "--dry-run", "--json"], { env: configured });
     const payload = parseJsonLine(json.stdout);
     expect(payload["dry_run"]).toBe(true);
@@ -386,7 +439,9 @@ describe("send", () => {
   });
 
   it("fails on an invalid configuration before touching any input", async () => {
-    const branded = await cli(["missing.txt"], { env: { DWH_WEBHOOK_URL: "https://example.com/hook" } });
+    const branded = await cli(["missing.txt"], {
+      env: { DWH_WEBHOOK_URL: "https://example.com/hook" },
+    });
     expect(branded.code).toBe(1);
     expect(branded.stderr).toEqual([
       "dwh: error dwh(invalid-config): DWH_WEBHOOK_URL is not a Discord webhook URL help: expected https://discord.com/api/webhooks/<id>/<token>; copy it from Discord: channel settings > Integrations > Webhooks",
@@ -463,7 +518,8 @@ describe("send", () => {
 
   it("never leaks the URL through network errors, hidden or not", async () => {
     const path = await scratchFile("a.txt");
-    const failures = (): Error[] => Array.from({ length: 5 }, () => new Error(`fetch failed for ${WEBHOOK}?wait=true`));
+    const failures = (): Error[] =>
+      Array.from({ length: 5 }, () => new Error(`fetch failed for ${WEBHOOK}?wait=true`));
     const branded = await cli([path], { env: configured, responses: failures() });
     expect(branded.code).toBe(1);
     expect(branded.stderr.at(-1)).toContain("could not reach Discord after 5 attempts");
@@ -500,7 +556,10 @@ describe("check", () => {
   });
 
   it("emits the webhook object under --json", async () => {
-    const { stdout } = await cli(["check", "--json"], { env: configured, responses: [webhookObject()] });
+    const { stdout } = await cli(["check", "--json"], {
+      env: configured,
+      responses: [webhookObject()],
+    });
     expect(parseJsonLine(stdout)).toEqual({
       ok: true,
       command: "check",
@@ -511,7 +570,10 @@ describe("check", () => {
   });
 
   it("says only that the destination is ok when hidden", async () => {
-    const plain = await cli(["check"], { env: hiddenConfigured, responses: [webhookObject("Discord Webhook Bot")] });
+    const plain = await cli(["check"], {
+      env: hiddenConfigured,
+      responses: [webhookObject("Discord Webhook Bot")],
+    });
     expect(plain.code).toBe(0);
     expect(plain.stdout).toEqual(["destination: ok"]);
     const json = await cli(["check", "--json"], {
@@ -519,7 +581,10 @@ describe("check", () => {
       responses: [webhookObject("Discord Webhook Bot")],
     });
     expect(parseJsonLine(json.stdout)).toEqual({ ok: true, command: "check" });
-    const quiet = await cli(["check", "--quiet"], { env: hiddenConfigured, responses: [webhookObject()] });
+    const quiet = await cli(["check", "--quiet"], {
+      env: hiddenConfigured,
+      responses: [webhookObject()],
+    });
     expect(quiet.stdout).toEqual([]);
   });
 
@@ -550,14 +615,22 @@ describe("hidden destination sweep", () => {
     const huge = join(dir, "huge.bin");
     await writeFile(huge, "");
     await truncate(huge, 101 * 1024 * 1024);
-    const embedded = ["discord_backup.zip", "MyDiscordFile.txt", "my_webhook.json"].map((name) => join(dir, name));
+    const embedded = ["discord_backup.zip", "MyDiscordFile.txt", "my_webhook.json"].map((name) =>
+      join(dir, name),
+    );
     for (const path of embedded) {
       await writeFile(path, "x");
     }
-    const png = (): Response => new Response("png", { status: 200, headers: { "content-type": "image/png" } });
+    const png = (): Response =>
+      new Response("png", { status: 200, headers: { "content-type": "image/png" } });
     const landedOnWebhook = (): Response => {
-      const response = new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
-      Object.defineProperty(response, "url", { value: "https://discord.com/api/webhooks/1/secret-token" });
+      const response = new Response("{}", {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+      Object.defineProperty(response, "url", {
+        value: "https://discord.com/api/webhooks/1/secret-token",
+      });
       return response;
     };
     const env = hiddenConfigured;
@@ -565,7 +638,10 @@ describe("hidden destination sweep", () => {
       [[...embedded], { env, responses: [message()] }],
       [[...embedded, "--json"], { env, responses: [message()] }],
       [[...embedded, "--dry-run"], { env }],
-      [["https://media.discordapp.net/attachments/1/2/discord.png"], { env, responses: [png(), message()] }],
+      [
+        ["https://media.discordapp.net/attachments/1/2/discord.png"],
+        { env, responses: [png(), message()] },
+      ],
       [["https://example.com/short-link"], { env, responses: [landedOnWebhook()] }],
       [["https://example.com/short-link", "--json"], { env, responses: [landedOnWebhook()] }],
       [["--help"], { env }],
@@ -573,28 +649,58 @@ describe("hidden destination sweep", () => {
       [["check", "--help"], { env }],
       [[], { env }],
       [[small], { env: { DWH_HIDE_DESTINATION: "1" } }],
-      [[small], { env: { DWH_HIDE_DESTINATION: "1", DWH_WEBHOOK_URL: "https://discord.com/nope" } }],
+      [
+        [small],
+        { env: { DWH_HIDE_DESTINATION: "1", DWH_WEBHOOK_URL: "https://discord.com/nope" } },
+      ],
       [[huge], { env }],
       [[join(dir, "missing.txt")], { env }],
       [[small], { env, responses: [rejection(404, { message: "Unknown Webhook", code: 10015 })] }],
       [[small], { env, responses: [rejection(400, "Discord says: no webhook here")] }],
       [[small], { env, responses: [rejection(403, { message: "Missing Access", code: 50001 })] }],
       [[small], { env, responses: [rejection(404, { message: "Unknown Channel", code: 10003 })] }],
-      [[small], { env, responses: Array.from({ length: 5 }, () => new Error(`ECONNRESET ${WEBHOOK}`)) }],
-      [[small], { env, responses: Array.from({ length: 5 }, () => new Response("", { status: 502 })) }],
+      [
+        [small],
+        { env, responses: Array.from({ length: 5 }, () => new Error(`ECONNRESET ${WEBHOOK}`)) },
+      ],
+      [
+        [small],
+        { env, responses: Array.from({ length: 5 }, () => new Response("", { status: 502 })) },
+      ],
       [[small], { env, responses: [rateLimited(3), message()] }],
-      [[small, "--json"], { env, responses: [message("m1", [{ id: "a1", url: "https://cdn.discordapp.com/x" }])] }],
+      [
+        [small, "--json"],
+        { env, responses: [message("m1", [{ id: "a1", url: "https://cdn.discordapp.com/x" }])] },
+      ],
       [["check"], { env, responses: [webhookObject("Discord Webhook Bot")] }],
       [["check", "--json"], { env, responses: [webhookObject("Discord Webhook Bot")] }],
-      [["check"], { env, responses: [rejection(401, { message: "Invalid Webhook Token", code: 50027 })] }],
-      [["check"], { env, responses: Array.from({ length: 5 }, () => new Error(`fetch failed ${WEBHOOK}`)) }],
+      [
+        ["check"],
+        { env, responses: [rejection(401, { message: "Invalid Webhook Token", code: 50027 })] },
+      ],
+      [
+        ["check"],
+        { env, responses: Array.from({ length: 5 }, () => new Error(`fetch failed ${WEBHOOK}`)) },
+      ],
       [
         ["https://cdn.discordapp.com/attachments/1/2/discord.png"],
-        { env, responses: [new Response("png", { status: 200, headers: { "content-type": "image/png" } }), message()] },
+        {
+          env,
+          responses: [
+            new Response("png", { status: 200, headers: { "content-type": "image/png" } }),
+            message(),
+          ],
+        },
       ],
       [
         ["https://cdn.discordapp.com/attachments/1/2/discord.png", "--json"],
-        { env, responses: [new Response("png", { status: 200, headers: { "content-type": "image/png" } }), message()] },
+        {
+          env,
+          responses: [
+            new Response("png", { status: 200, headers: { "content-type": "image/png" } }),
+            message(),
+          ],
+        },
       ],
       [
         ["https://cdn.discordapp.com/attachments/1/2/gone.png"],
