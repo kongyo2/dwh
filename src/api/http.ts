@@ -1,5 +1,6 @@
 import { EnvHttpProxyAgent, fetch as undiciFetch } from "undici";
-import { adviceDiagnostic, type Diagnostic } from "./diagnostics.js";
+
+import { adviceDiagnostic, type Diagnostic } from "../lib/diagnostics.js";
 
 export type FetchLike = typeof undiciFetch;
 
@@ -60,7 +61,11 @@ export function retryBudget(context: RetryContext): RetryBudget {
       }
       const delayMs = transientDelayMs(failures);
       context.emit(
-        adviceDiagnostic(failure.location, "retry", `${failure.note}; retrying in ${formatSeconds(delayMs)}`),
+        adviceDiagnostic(
+          failure.location,
+          "retry",
+          `${failure.note}; retrying in ${formatSeconds(delayMs)}`,
+        ),
       );
       await context.sleep(delayMs);
     },
@@ -73,7 +78,8 @@ export function describeFetchError(error: unknown): string {
       return "request timed out";
     }
     const cause = error.cause;
-    const causeText = cause instanceof Error ? ` (${(cause as NodeJS.ErrnoException).code ?? cause.message})` : "";
+    const causeText =
+      cause instanceof Error ? ` (${(cause as NodeJS.ErrnoException).code ?? cause.message})` : "";
     return `${error.message}${causeText}`;
   }
   return String(error);

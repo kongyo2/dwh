@@ -39,7 +39,12 @@ export function formatDiagnostic(diagnostic: Diagnostic): string {
   return `${location}: ${diagnostic.severity} dwh(${diagnostic.code}): ${compactText(diagnostic.message)}${helpText}`;
 }
 
-export type DiagnosticMaker = (location: string, code: DiagnosticCode, message: string, help?: string) => Diagnostic;
+export type DiagnosticMaker = (
+  location: string,
+  code: DiagnosticCode,
+  message: string,
+  help?: string,
+) => Diagnostic;
 
 function makerFor(severity: Severity): DiagnosticMaker {
   return (location, code, message, help) => ({ location, severity, code, message, help });
@@ -49,7 +54,10 @@ export const errorDiagnostic: DiagnosticMaker = makerFor("error");
 
 export const adviceDiagnostic: DiagnosticMaker = makerFor("advice");
 
-export function scrubDiagnostic(diagnostic: Diagnostic, scrub: (text: string) => string): Diagnostic {
+export function scrubDiagnostic(
+  diagnostic: Diagnostic,
+  scrub: (text: string) => string,
+): Diagnostic {
   return {
     ...diagnostic,
     location: scrub(diagnostic.location),

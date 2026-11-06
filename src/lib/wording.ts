@@ -12,7 +12,7 @@ export interface Wording {
   readonly service: string;
   readonly Service: string;
   readonly tooLarge: (size: string, limit: string) => string;
-  readonly uploadLimitHelp: (largest: string | undefined) => string;
+  readonly uploadLimitHelp: (largest: string | undefined, defaultLimit: string) => string;
   readonly badDestinationHelp: string;
   readonly badThreadHelp: string;
   readonly notConfigured: { readonly message: string; readonly help: string };
@@ -29,7 +29,10 @@ const DECODED_WEBHOOK_PATH_PATTERN = /^\/api(\/v\d+)?\/webhooks\/(\d+)\/[^/]+$/;
 
 export function redactWebhookTokens(text: string): string {
   return text
-    .replace(URL_CANDIDATE_PATTERN, (candidate) => canonicalRedactedWebhookUrl(candidate) ?? candidate)
+    .replace(
+      URL_CANDIDATE_PATTERN,
+      (candidate) => canonicalRedactedWebhookUrl(candidate) ?? candidate,
+    )
     .replace(BARE_WEBHOOK_PATH_PATTERN, "$1<token>");
 }
 
@@ -66,7 +69,10 @@ function isServiceUrl(candidate: string): boolean {
 const WEBHOOK_URL_PATTERN =
   /https?:\/\/(?:[\w-]+\.)*discord(?:app)?\.com\/api\/(?:v\d+\/)?webhooks\/\d+\/(?:[\w-]+|<token>)(?:\?[^\s"'<>)]*)?/gi;
 const SERVICE_DOMAIN = String.raw`(?:[\w-]+\.)*discord[\w-]*\.(?:com|net|gg|new|dev|media|co)`;
-const SERVICE_URL_PATTERN = new RegExp(String.raw`https?://${SERVICE_DOMAIN}(?::\d+)?(?:/[^\s"'<>)]*)?`, "gi");
+const SERVICE_URL_PATTERN = new RegExp(
+  String.raw`https?://${SERVICE_DOMAIN}(?::\d+)?(?:/[^\s"'<>)]*)?`,
+  "gi",
+);
 const HOST_PATTERN = new RegExp(String.raw`\b${SERVICE_DOMAIN}\b`, "gi");
 const CONFIG_VAR_PATTERN = /\b(?:DWH|DISCORD)_WEBHOOK_URL\b/g;
 const DISCORD_WORD_PATTERN = /\bdiscord\b/gi;
@@ -77,7 +83,9 @@ const WEBHOOK_ANYWHERE_PATTERN = /webhooks?/gi;
 export function neutralize(text: string): string {
   return text
     .replace(WEBHOOK_URL_PATTERN, "<destination>")
-    .replace(URL_CANDIDATE_PATTERN, (candidate) => (isServiceUrl(candidate) ? "<destination>" : candidate))
+    .replace(URL_CANDIDATE_PATTERN, (candidate) =>
+      isServiceUrl(candidate) ? "<destination>" : candidate,
+    )
     .replace(SERVICE_URL_PATTERN, "<destination>")
     .replace(CONFIG_VAR_PATTERN, "the dwh configuration")
     .replace(HOST_PATTERN, "the destination")
@@ -87,24 +95,26 @@ export function neutralize(text: string): string {
     .replace(WEBHOOK_ANYWHERE_PATTERN, "destination");
 }
 
-const DEFAULT_UPLOAD_LIMIT = "10 MiB";
-
 const BRANDED: Wording = {
   hidden: false,
   service: "Discord",
   Service: "Discord",
   tooLarge: (size, limit) => `${size} exceeds Discord's absolute limit of ${limit}`,
-  uploadLimitHelp: (largest) =>
-    `${largest === undefined ? "a file exceeds" : `the largest file is ${largest}, over`} this server's upload limit (${DEFAULT_UPLOAD_LIMIT} per file by default, more when boosted); shrink or split it`,
+  uploadLimitHelp: (largest, defaultLimit) =>
+    `${largest === undefined ? "a file exceeds" : `the largest file is ${largest}, over`} this server's upload limit (${defaultLimit} per file by default, more when boosted); shrink or split it`,
   badDestinationHelp:
     "the webhook URL is wrong or the webhook was deleted; copy a fresh one (Discord: channel settings > Integrations > Webhooks) into DWH_WEBHOOK_URL",
-  badThreadHelp: "the ?thread_id in DWH_WEBHOOK_URL points at a thread that no longer exists; fix it or drop it",
+  badThreadHelp:
+    "the ?thread_id in DWH_WEBHOOK_URL points at a thread that no longer exists; fix it or drop it",
   notConfigured: {
     message: "no webhook configured",
     help: 'export DWH_WEBHOOK_URL="https://discord.com/api/webhooks/<id>/<token>" (create one in Discord: channel settings > Integrations > Webhooks > New Webhook > Copy Webhook URL)',
   },
   invalidConfig: (source, problem) => ({
-    message: problem === "not-a-url" ? `${source} is not a valid URL` : `${source} is not a Discord webhook URL`,
+    message:
+      problem === "not-a-url"
+        ? `${source} is not a valid URL`
+        : `${source} is not a Discord webhook URL`,
     help: `expected https://discord.com/api/webhooks/<id>/<token>; copy it from Discord: channel settings > Integrations > Webhooks`,
   }),
   scrub: redactWebhookTokens,
@@ -115,8 +125,8 @@ const NEUTRAL: Wording = {
   service: "the destination",
   Service: "The destination",
   tooLarge: (size, limit) => `${size} exceeds the absolute per-file limit of ${limit}`,
-  uploadLimitHelp: (largest) =>
-    `${largest === undefined ? "a file exceeds" : `the largest file is ${largest}, over`} the destination's per-file limit (usually ${DEFAULT_UPLOAD_LIMIT}); shrink or split it`,
+  uploadLimitHelp: (largest, defaultLimit) =>
+    `${largest === undefined ? "a file exceeds" : `the largest file is ${largest}, over`} the destination's per-file limit (usually ${defaultLimit}); shrink or split it`,
   badDestinationHelp:
     "the destination configured on this machine is no longer valid; only the user can fix that, so tell them",
   badThreadHelp:

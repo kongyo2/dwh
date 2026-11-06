@@ -1,8 +1,8 @@
-import { describe, expect, it } from "vitest";
 import { FormData } from "undici";
-import type { Diagnostic } from "../src/diagnostics.js";
-import type { FetchLike } from "../src/http.js";
-import type { OutgoingFile } from "../src/inputs.js";
+import { describe, expect, it } from "vitest";
+
+import type { FetchLike } from "../src/api/http.js";
+import type { OutgoingFile } from "../src/commands/send/inputs.js";
 import {
   checkWebhook,
   isWebhookUrl,
@@ -12,7 +12,8 @@ import {
   resolveWebhookConfig,
   resolveWebhookUrl,
   sendFiles,
-} from "../src/webhook.js";
+} from "../src/index.js";
+import type { Diagnostic } from "../src/lib/diagnostics.js";
 import { FORBIDDEN, sleepRecorder } from "./helpers.js";
 
 const WEBHOOK = "https://discord.com/api/webhooks/123456789/aBc_dEf-123";
@@ -25,7 +26,10 @@ function sizedFile(name: string, byteLength: number): OutgoingFile {
   return { name, data: { byteLength } as unknown as Uint8Array, contentType: "text/plain" };
 }
 
-function ok(headers: Record<string, string> = { "x-ratelimit-remaining": "4" }, body: unknown = { id: "1" }): Response {
+function ok(
+  headers: Record<string, string> = { "x-ratelimit-remaining": "4" },
+  body: unknown = { id: "1" },
+): Response {
   return new Response(JSON.stringify(body), { status: 200, headers });
 }
 
@@ -33,7 +37,11 @@ function rateLimited(retryAfterSeconds?: number): Response {
   const body =
     retryAfterSeconds === undefined
       ? "not json"
-      : JSON.stringify({ message: "You are being rate limited.", retry_after: retryAfterSeconds, global: false });
+      : JSON.stringify({
+          message: "You are being rate limited.",
+          retry_after: retryAfterSeconds,
+          global: false,
+        });
   return new Response(body, { status: 429 });
 }
 
@@ -85,23 +93,27 @@ describe("resolveWebhookUrl", () => {
   });
 
   it("rejects URLs that are not Discord webhooks", () => {
-    expect(() => resolveWebhookUrl({ DWH_WEBHOOK_URL: "https://example.com/api/webhooks/1/t" })).toThrow(
-      /DWH_WEBHOOK_URL is not a Discord webhook URL/,
+    expect(() =>
+      resolveWebhookUrl({ DWH_WEBHOOK_URL: "https://example.com/api/webhooks/1/t" }),
+    ).toThrow(/DWH_WEBHOOK_URL is not a Discord webhook URL/);
+    expect(() =>
+      resolveWebhookUrl({ DWH_WEBHOOK_URL: "http://discord.com/api/webhooks/1/t" }),
+    ).toThrow(/is not a Discord webhook URL/);
+    expect(() =>
+      resolveWebhookUrl({ DISCORD_WEBHOOK_URL: "https://discord.com/api/webhooks/notanid/t" }),
+    ).toThrow(/DISCORD_WEBHOOK_URL is not a Discord webhook URL/);
+    expect(() => resolveWebhookUrl({ DWH_WEBHOOK_URL: "not a url" })).toThrow(
+      /DWH_WEBHOOK_URL is not a valid URL/,
     );
-    expect(() => resolveWebhookUrl({ DWH_WEBHOOK_URL: "http://discord.com/api/webhooks/1/t" })).toThrow(
-      /is not a Discord webhook URL/,
-    );
-    expect(() => resolveWebhookUrl({ DISCORD_WEBHOOK_URL: "https://discord.com/api/webhooks/notanid/t" })).toThrow(
-      /DISCORD_WEBHOOK_URL is not a Discord webhook URL/,
-    );
-    expect(() => resolveWebhookUrl({ DWH_WEBHOOK_URL: "not a url" })).toThrow(/DWH_WEBHOOK_URL is not a valid URL/);
   });
 
   it("words configuration errors neutrally when DWH_HIDE_DESTINATION is set", () => {
     const missing = rejectionOfSync(() => resolveWebhookUrl({ DWH_HIDE_DESTINATION: "1" }));
     expect(missing.message).toContain("dwh(not-configured)");
     expect(missing.message).not.toMatch(FORBIDDEN);
-    const invalid = rejectionOfSync(() => resolveWebhookUrl({ DWH_HIDE_DESTINATION: "1", DWH_WEBHOOK_URL: "nope" }));
+    const invalid = rejectionOfSync(() =>
+      resolveWebhookUrl({ DWH_HIDE_DESTINATION: "1", DWH_WEBHOOK_URL: "nope" }),
+    );
     expect(invalid.message).toContain("dwh(invalid-config)");
     expect(invalid.message).not.toMatch(FORBIDDEN);
   });
@@ -141,7 +153,11 @@ describe("planBatches", () => {
 
   it("splits by cumulative size", () => {
     const tenMiB = 10 * 1024 * 1024;
-    const batches = planBatches([sizedFile("a", tenMiB), sizedFile("b", tenMiB), sizedFile("c", tenMiB)]);
+    const batches = planBatches([
+      sizedFile("a", tenMiB),
+      sizedFile("b", tenMiB),
+      sizedFile("c", tenMiB),
+    ]);
     expect(batches.map((batch) => batch.map((entry) => entry.name))).toEqual([["a", "b"], ["c"]]);
   });
 
@@ -190,7 +206,11 @@ describe("sendFiles", () => {
       fetchImpl: impl,
       sleep,
       onSent: (entry, delivery) => {
-        deliveries.push({ name: entry.name, message: delivery.message, messageId: delivery.messageId });
+        deliveries.push({
+          name: entry.name,
+          message: delivery.message,
+          messageId: delivery.messageId,
+        });
       },
     });
     expect(deliveries).toEqual([
@@ -209,7 +229,11 @@ describe("sendFiles", () => {
     const { impl } = queueFetch(new Response(null, { status: 204 }));
     const { sleep } = sleepRecorder();
     const result = await sendFiles(WEBHOOK, [file("a.txt")], { fetchImpl: impl, sleep });
-    expect(result.deliveries[0]).toMatchObject({ messageId: undefined, attachmentId: undefined, url: undefined });
+    expect(result.deliveries[0]).toMatchObject({
+      messageId: undefined,
+      attachmentId: undefined,
+      url: undefined,
+    });
   });
 
   it("numbers messages across batches", async () => {
@@ -218,7 +242,10 @@ describe("sendFiles", () => {
     const { sleep } = sleepRecorder();
     const result = await sendFiles(WEBHOOK, files, { fetchImpl: impl, sleep });
     expect(result.messages).toBe(2);
-    expect(result.deliveries.map((delivery) => delivery.message)).toEqual([...Array.from({ length: 10 }, () => 1), 2]);
+    expect(result.deliveries.map((delivery) => delivery.message)).toEqual([
+      ...Array.from({ length: 10 }, () => 1),
+      2,
+    ]);
     expect(result.deliveries.at(-1)?.messageId).toBe("m2");
   });
 
@@ -271,7 +298,11 @@ describe("sendFiles", () => {
   });
 
   it("retries 5xx with backoff and succeeds", async () => {
-    const { calls, impl } = queueFetch(new Response("", { status: 500 }), new Response("", { status: 502 }), ok());
+    const { calls, impl } = queueFetch(
+      new Response("", { status: 500 }),
+      new Response("", { status: 502 }),
+      ok(),
+    );
     const { waits, sleep } = sleepRecorder();
     const notes: Diagnostic[] = [];
     await sendFiles(WEBHOOK, [file("a.txt")], {
@@ -307,9 +338,13 @@ describe("sendFiles", () => {
   });
 
   it("gives up after five 5xx attempts", async () => {
-    const { calls, impl } = queueFetch(...Array.from({ length: 5 }, () => new Response("", { status: 500 })));
+    const { calls, impl } = queueFetch(
+      ...Array.from({ length: 5 }, () => new Response("", { status: 500 })),
+    );
     const { waits, sleep } = sleepRecorder();
-    const error = await rejectionOf(sendFiles(WEBHOOK, [file("a.txt")], { fetchImpl: impl, sleep }));
+    const error = await rejectionOf(
+      sendFiles(WEBHOOK, [file("a.txt")], { fetchImpl: impl, sleep }),
+    );
     expect(error.message).toMatch(
       /^dwh: error dwh\(unavailable\): Discord kept failing \(500\) after 5 attempts help: /,
     );
@@ -321,7 +356,9 @@ describe("sendFiles", () => {
     const failure = (): Error => new Error(`fetch failed for ${WEBHOOK}`);
     const { calls, impl } = queueFetch(failure(), failure(), failure(), failure(), failure());
     const { sleep } = sleepRecorder();
-    const error = await rejectionOf(sendFiles(WEBHOOK, [file("a.txt")], { fetchImpl: impl, sleep }));
+    const error = await rejectionOf(
+      sendFiles(WEBHOOK, [file("a.txt")], { fetchImpl: impl, sleep }),
+    );
     expect(error.message).toContain("dwh(unreachable): could not reach Discord after 5 attempts");
     expect(error.message).toContain("<token>");
     expect(error.message).not.toContain("aBc_dEf-123");
@@ -334,7 +371,10 @@ describe("sendFiles", () => {
     const { calls, impl } = queueFetch(new Response(body, { status: 400 }));
     const { sleep } = sleepRecorder();
     const error = await rejectionOf(
-      sendFiles(WEBHOOK, [file("small.txt", 1), file("huge.bin", 9), file("mid.txt", 5)], { fetchImpl: impl, sleep }),
+      sendFiles(WEBHOOK, [file("small.txt", 1), file("huge.bin", 9), file("mid.txt", 5)], {
+        fetchImpl: impl,
+        sleep,
+      }),
     );
     expect(error.message).toBe(
       "dwh: error dwh(rejected): Discord rejected small.txt, huge.bin, mid.txt: 400 Request entity too large help: the largest file is huge.bin (9 B), over this server's upload limit (10 MiB per file by default, more when boosted); shrink or split it",
@@ -350,7 +390,9 @@ describe("sendFiles", () => {
     ] as const) {
       const { impl } = queueFetch(new Response(JSON.stringify(body), { status }));
       const { sleep } = sleepRecorder();
-      const error = await rejectionOf(sendFiles(WEBHOOK, [file("a.txt")], { fetchImpl: impl, sleep }));
+      const error = await rejectionOf(
+        sendFiles(WEBHOOK, [file("a.txt")], { fetchImpl: impl, sleep }),
+      );
       expect(error.message).toContain("dwh(bad-destination)");
       expect(error.message).toContain("DWH_WEBHOOK_URL");
     }
@@ -361,7 +403,9 @@ describe("sendFiles", () => {
       new Response(JSON.stringify({ message: "Unknown Channel", code: 10003 }), { status: 404 }),
     );
     const { sleep } = sleepRecorder();
-    const error = await rejectionOf(sendFiles(WEBHOOK, [file("a.txt")], { fetchImpl: impl, sleep }));
+    const error = await rejectionOf(
+      sendFiles(WEBHOOK, [file("a.txt")], { fetchImpl: impl, sleep }),
+    );
     expect(error.message).toContain("dwh(bad-destination)");
     expect(error.message).toContain("thread_id");
   });
@@ -396,7 +440,10 @@ describe("sendFiles", () => {
 
   it("pauses between messages when the rate limit budget is spent", async () => {
     const files = Array.from({ length: 11 }, (_, index) => file(`f${index}.txt`));
-    const { calls, impl } = queueFetch(ok({ "x-ratelimit-remaining": "0", "x-ratelimit-reset-after": "3.2" }), ok());
+    const { calls, impl } = queueFetch(
+      ok({ "x-ratelimit-remaining": "0", "x-ratelimit-reset-after": "3.2" }),
+      ok(),
+    );
     const { waits, sleep } = sleepRecorder();
     const sent: string[] = [];
     const notes: Diagnostic[] = [];
@@ -417,7 +464,9 @@ describe("sendFiles", () => {
   });
 
   it("does not pause after the final message", async () => {
-    const { impl } = queueFetch(ok({ "x-ratelimit-remaining": "0", "x-ratelimit-reset-after": "5" }));
+    const { impl } = queueFetch(
+      ok({ "x-ratelimit-remaining": "0", "x-ratelimit-reset-after": "5" }),
+    );
     const { waits, sleep } = sleepRecorder();
     await sendFiles(WEBHOOK, [file("a.txt")], { fetchImpl: impl, sleep });
     expect(waits).toEqual([]);
@@ -425,16 +474,30 @@ describe("sendFiles", () => {
 });
 
 describe("checkWebhook", () => {
-  const webhookObject = { id: "223", name: "build-bot", type: 1, channel_id: "199", guild_id: "56" };
+  const webhookObject = {
+    id: "223",
+    name: "build-bot",
+    type: 1,
+    channel_id: "199",
+    guild_id: "56",
+  };
 
   it("GETs the webhook without its query string and parses the object", async () => {
-    const { calls, impl } = queueFetch(new Response(JSON.stringify(webhookObject), { status: 200 }));
+    const { calls, impl } = queueFetch(
+      new Response(JSON.stringify(webhookObject), { status: 200 }),
+    );
     const { sleep } = sleepRecorder();
     const info = await checkWebhook(`${WEBHOOK}?thread_id=42`, { fetchImpl: impl, sleep });
     expect(calls).toHaveLength(1);
     expect(calls[0]?.url).toBe(WEBHOOK);
     expect(calls[0]?.init.method).toBe("GET");
-    expect(info).toEqual({ id: "223", name: "build-bot", type: 1, channelId: "199", guildId: "56" });
+    expect(info).toEqual({
+      id: "223",
+      name: "build-bot",
+      type: 1,
+      channelId: "199",
+      guildId: "56",
+    });
   });
 
   it("waits out a 429 and retries 5xx like delivery does", async () => {
@@ -465,20 +528,32 @@ describe("checkWebhook", () => {
     const { impl } = queueFetch(new Response("<html>", { status: 200 }));
     const { sleep } = sleepRecorder();
     const info = await checkWebhook(WEBHOOK, { fetchImpl: impl, sleep });
-    expect(info).toEqual({ id: undefined, name: undefined, type: undefined, channelId: undefined, guildId: undefined });
+    expect(info).toEqual({
+      id: undefined,
+      name: undefined,
+      type: undefined,
+      channelId: undefined,
+      guildId: undefined,
+    });
   });
 });
 
 describe("direct URLs", () => {
   it("rejects a malformed or foreign URL with an invalid-config diagnostic, before any request", async () => {
-    for (const bad of ["garbage", "https://example.com/api/webhooks/1/t", "http://discord.com/api/webhooks/1/t"]) {
+    for (const bad of [
+      "garbage",
+      "https://example.com/api/webhooks/1/t",
+      "http://discord.com/api/webhooks/1/t",
+    ]) {
       const { calls, impl } = queueFetch();
       const { sleep } = sleepRecorder();
       const checkError = await rejectionOf(checkWebhook(bad, { fetchImpl: impl, sleep }));
       expect(checkError.message).toMatch(
         /^dwh: error dwh\(invalid-config\): the webhook URL is not a (valid|Discord webhook) URL help: /,
       );
-      const sendError = await rejectionOf(sendFiles(bad, [file("a.txt")], { fetchImpl: impl, sleep }));
+      const sendError = await rejectionOf(
+        sendFiles(bad, [file("a.txt")], { fetchImpl: impl, sleep }),
+      );
       expect(sendError.message).toContain("dwh(invalid-config)");
       expect(calls).toHaveLength(0);
     }
@@ -503,7 +578,9 @@ describe("direct URLs", () => {
 
 describe("redactWebhookTokens", () => {
   it("keeps the id but hides the token", () => {
-    const redacted = redactWebhookTokens(`error at ${WEBHOOK} and https://discord.com/api/v10/webhooks/9/tok-en_1`);
+    const redacted = redactWebhookTokens(
+      `error at ${WEBHOOK} and https://discord.com/api/v10/webhooks/9/tok-en_1`,
+    );
     expect(redacted).toBe(
       "error at https://discord.com/api/webhooks/123456789/<token> and https://discord.com/api/v10/webhooks/9/<token>",
     );

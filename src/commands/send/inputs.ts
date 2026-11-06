@@ -1,6 +1,7 @@
 import { readFile, stat } from "node:fs/promises";
 import { basename, dirname } from "node:path";
-import { DiagnosticError, diagnosticsOf, errorDiagnostic, scrubDiagnostic, type Diagnostic } from "./diagnostics.js";
+
+import { sendOperation } from "../../_generated/dwh/send.js";
 import {
   defaultSleep,
   describeFetchError,
@@ -9,12 +10,20 @@ import {
   retryBudget,
   type FetchLike,
   type RequestOptions,
-} from "./http.js";
-import { formatMiB, shellQuote } from "./text.js";
-import { isWebhookUrl } from "./webhook.js";
-import { wordingFor, type Wording } from "./wording.js";
+} from "../../api/http.js";
+import type { UploadFile } from "../../api/operation.js";
+import { isWebhookUrl } from "../../destination.js";
+import {
+  DiagnosticError,
+  diagnosticsOf,
+  errorDiagnostic,
+  scrubDiagnostic,
+  type Diagnostic,
+} from "../../lib/diagnostics.js";
+import { formatMiB, shellQuote } from "../../lib/text.js";
+import { wordingFor, type Wording } from "../../lib/wording.js";
 
-export interface OutgoingFile {
+export interface OutgoingFile extends UploadFile {
   name: string;
   data: Uint8Array;
   contentType: string;
@@ -26,7 +35,7 @@ export interface ResolveOptions extends RequestOptions {
   readStdin?: (() => Promise<Uint8Array>) | undefined;
 }
 
-export const MAX_FILE_BYTES: number = 100 * 1024 * 1024;
+export const MAX_FILE_BYTES: number = sendOperation.upload.maxFileBytes;
 
 export const MAX_TOTAL_BYTES: number = 512 * 1024 * 1024;
 
@@ -115,7 +124,10 @@ export function isUrl(spec: string): boolean {
   return /^https?:\/\//i.test(spec);
 }
 
-export async function resolveInputs(specs: readonly string[], options: ResolveOptions = {}): Promise<OutgoingFile[]> {
+export async function resolveInputs(
+  specs: readonly string[],
+  options: ResolveOptions = {},
+): Promise<OutgoingFile[]> {
   const wording = wordingFor(options.hideDestination);
   const onDiagnostic = options.onDiagnostic;
   const context: ResolveContext = {
@@ -228,14 +240,24 @@ function claimBufferBytes(budget: BufferBudget, bytes: number, location: string)
   budget.used += bytes;
 }
 
-function tooLarge(location: string, actual: number, wording: Wording, splitSource?: string): DiagnosticError {
+function tooLarge(
+  location: string,
+  actual: number,
+  wording: Wording,
+  splitSource?: string,
+): DiagnosticError {
   let help = "shrink it, or split it into parts under the destination's per-file limit";
   if (splitSource !== undefined) {
     const stem = shellQuote(basename(splitSource) || "file");
     help = `shrink it or split it, e.g. split -b 9M ${shellQuote(splitSource)} ${stem}.part- && dwh ${stem}.part-*`;
   }
   return new DiagnosticError([
-    errorDiagnostic(location, "too-large", wording.tooLarge(formatMiB(actual), formatMiB(MAX_FILE_BYTES)), help),
+    errorDiagnostic(
+      location,
+      "too-large",
+      wording.tooLarge(formatMiB(actual), formatMiB(MAX_FILE_BYTES)),
+      help,
+    ),
   ]);
 }
 
@@ -339,9 +361,13 @@ async function download(url: string, context: ResolveContext): Promise<OutgoingF
         location: url,
         note: `GET failed (${description})`,
         giveUp: () =>
-          downloadFailed(`GET failed after ${MAX_TRANSIENT_ATTEMPTS} attempts: ${description}`, giveUpHelp, {
-            cause: error,
-          }),
+          downloadFailed(
+            `GET failed after ${MAX_TRANSIENT_ATTEMPTS} attempts: ${description}`,
+            giveUpHelp,
+            {
+              cause: error,
+            },
+          ),
       });
       continue;
     }
@@ -392,9 +418,18 @@ async function download(url: string, context: ResolveContext): Promise<OutgoingF
     const headerType = normalizeContentType(response.headers.get("content-type"));
     const overrideName = sanitizeFilename(options.nameOverride ?? "");
     if (overrideName !== "") {
-      return { name: overrideName, data, contentType: extensionContentType(overrideName) ?? headerType, source: url };
+      return {
+        name: overrideName,
+        data,
+        contentType: extensionContentType(overrideName) ?? headerType,
+        source: url,
+      };
     }
-    const name = filenameForDownload(response.url || url, response.headers.get("content-disposition"), headerType);
+    const name = filenameForDownload(
+      response.url || url,
+      response.headers.get("content-disposition"),
+      headerType,
+    );
     return { name, data, contentType: headerType, source: url };
   }
 }
@@ -478,7 +513,11 @@ async function readBodyCapped(
   }
 }
 
-export function filenameForDownload(finalUrl: string, contentDisposition: string | null, contentType: string): string {
+export function filenameForDownload(
+  finalUrl: string,
+  contentDisposition: string | null,
+  contentType: string,
+): string {
   let name = "";
   let fromHostname = false;
   if (contentDisposition !== null) {

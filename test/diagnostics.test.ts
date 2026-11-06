@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+
 import {
   adviceDiagnostic,
   compactText,
@@ -6,20 +7,22 @@ import {
   diagnosticsOf,
   errorDiagnostic,
   formatDiagnostic,
-} from "../src/diagnostics.js";
+} from "../src/lib/diagnostics.js";
 
 describe("formatDiagnostic", () => {
   it("serializes location, severity, rule, message, and help on one line", () => {
-    expect(formatDiagnostic(errorDiagnostic("report.md", "not-found", "no such file", "check the path"))).toBe(
-      "report.md: error dwh(not-found): no such file help: check the path",
-    );
+    expect(
+      formatDiagnostic(errorDiagnostic("report.md", "not-found", "no such file", "check the path")),
+    ).toBe("report.md: error dwh(not-found): no such file help: check the path");
   });
 
   it("omits the help tail when there is none", () => {
     expect(formatDiagnostic(adviceDiagnostic("dwh", "rate-limit", "waiting 2.0s"))).toBe(
       "dwh: advice dwh(rate-limit): waiting 2.0s",
     );
-    expect(formatDiagnostic(errorDiagnostic("dwh", "internal", "boom", "   "))).toBe("dwh: error dwh(internal): boom");
+    expect(formatDiagnostic(errorDiagnostic("dwh", "internal", "boom", "   "))).toBe(
+      "dwh: error dwh(internal): boom",
+    );
   });
 
   it("collapses every whitespace run to one space and trims, newlines and NBSP included", () => {
@@ -30,16 +33,22 @@ describe("formatDiagnostic", () => {
       message: "Failed to parse\nconfiguration  file ",
       help: "  try\r\n again  ",
     });
-    expect(line).toBe("config.json: error dwh(internal): Failed to parse configuration file help: try again");
+    expect(line).toBe(
+      "config.json: error dwh(internal): Failed to parse configuration file help: try again",
+    );
     expect(line).not.toContain("\n");
   });
 
   it("substitutes <unknown> for an empty location", () => {
-    expect(formatDiagnostic(errorDiagnostic("", "internal", "lost"))).toBe("<unknown>: error dwh(internal): lost");
+    expect(formatDiagnostic(errorDiagnostic("", "internal", "lost"))).toBe(
+      "<unknown>: error dwh(internal): lost",
+    );
   });
 
   it("keeps colons inside messages intact", () => {
-    const line = formatDiagnostic(errorDiagnostic("x.ts", "internal", "Expected `;` but found `:`"));
+    const line = formatDiagnostic(
+      errorDiagnostic("x.ts", "internal", "Expected `;` but found `:`"),
+    );
     expect(line).toBe("x.ts: error dwh(internal): Expected `;` but found `:`");
   });
 });
@@ -69,6 +78,8 @@ describe("DiagnosticError", () => {
     expect(diagnosticsOf(new Error("unexpected"), "x.txt")).toEqual([
       errorDiagnostic("x.txt", "internal", "unexpected"),
     ]);
-    expect(diagnosticsOf("plain string")).toEqual([errorDiagnostic("dwh", "internal", "plain string")]);
+    expect(diagnosticsOf("plain string")).toEqual([
+      errorDiagnostic("dwh", "internal", "plain string"),
+    ]);
   });
 });

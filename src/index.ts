@@ -1,4 +1,37 @@
 export {
+  describeFetchError,
+  proxyAwareFetch,
+  type FetchLike,
+  type RequestOptions,
+} from "./api/http.js";
+export { checkWebhook, type CheckOptions, type WebhookInfo } from "./commands/check/probe.js";
+export {
+  MAX_BATCH_BYTES,
+  MAX_FILES_PER_MESSAGE,
+  planBatches,
+  sendFiles,
+  type Delivery,
+  type SendOptions,
+  type SendResult,
+} from "./commands/send/deliver.js";
+export {
+  filenameForDownload,
+  isUrl,
+  MAX_FILE_BYTES,
+  MAX_TOTAL_BYTES,
+  resolveInputs,
+  type OutgoingFile,
+  type ResolveOptions,
+} from "./commands/send/inputs.js";
+export {
+  isWebhookUrl,
+  resolveWebhookConfig,
+  resolveWebhookUrl,
+  WEBHOOK_ENV_VARS,
+  type WebhookConfig,
+  type WebhookEnvVar,
+} from "./destination.js";
+export {
   compactText,
   DiagnosticError,
   diagnosticsOf,
@@ -7,42 +40,14 @@ export {
   type Diagnostic,
   type DiagnosticCode,
   type Severity,
-} from "./diagnostics.js";
-export { describeFetchError, proxyAwareFetch, type FetchLike, type RequestOptions } from "./http.js";
-export {
-  filenameForDownload,
-  isUrl,
-  resolveInputs,
-  MAX_FILE_BYTES,
-  MAX_TOTAL_BYTES,
-  type OutgoingFile,
-  type ResolveOptions,
-} from "./inputs.js";
-export { EXIT_FAILURE, EXIT_OK, EXIT_USAGE, run, type RunIo } from "./run.js";
-export {
-  checkWebhook,
-  isWebhookUrl,
-  planBatches,
-  redactWebhookTokens,
-  resolveWebhookConfig,
-  resolveWebhookUrl,
-  sendFiles,
-  MAX_BATCH_BYTES,
-  MAX_FILES_PER_MESSAGE,
-  WEBHOOK_ENV_VARS,
-  type CheckOptions,
-  type Delivery,
-  type SendOptions,
-  type SendResult,
-  type WebhookConfig,
-  type WebhookEnvVar,
-  type WebhookInfo,
-} from "./webhook.js";
+} from "./lib/diagnostics.js";
 export {
   HIDE_DESTINATION_ENV_VAR,
   hideDestinationFrom,
   neutralize,
+  redactWebhookTokens,
   wordingFor,
   wordingFromEnv,
   type Wording,
-} from "./wording.js";
+} from "./lib/wording.js";
+export { EXIT_FAILURE, EXIT_OK, EXIT_USAGE, run, type RunIo } from "./run.js";
